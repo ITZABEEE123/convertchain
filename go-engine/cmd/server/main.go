@@ -1,194 +1,253 @@
 package main
 
 import (
-	"context"
-	"encoding/hex"
-	"errors"
-	"log/slog"
-	"net/http"
-	"os"
-	"time"
+    "context"
+    "encoding/hex"
+    "errors"
+    "log/slog"
+    "net/http"
+    "os"
+    "os/signal"
+    "strings"
+    "syscall"
+    "time"
 
-	"convert-chain/go-engine/internal/api"
-	"convert-chain/go-engine/internal/api/dto"
-	"convert-chain/go-engine/internal/api/handlers"
-	"convert-chain/go-engine/internal/crypto"
-	"convert-chain/go-engine/internal/domain"
-	binanceclient "convert-chain/go-engine/internal/exchange/binance"
-	bybitclient "convert-chain/go-engine/internal/exchange/bybit"
-	graphclient "convert-chain/go-engine/internal/graph"
-	smileidclient "convert-chain/go-engine/internal/kyc/smileid"
-	vaultclient "convert-chain/go-engine/internal/vault"
+    "convert-chain/go-engine/internal/api"
+    "convert-chain/go-engine/internal/api/handlers"
+    appcrypto "convert-chain/go-engine/internal/crypto"
+    binanceclient "convert-chain/go-engine/internal/exchange/binance"
+    bybitclient "convert-chain/go-engine/internal/exchange/bybit"
+    graphclient "convert-chain/go-engine/internal/graph"
+    "convert-chain/go-engine/internal/pricing"
+    "convert-chain/go-engine/internal/service"
+    "convert-chain/go-engine/internal/statemachine"
+    vaultclient "convert-chain/go-engine/internal/vault"
+    "convert-chain/go-engine/internal/workers"
+
+    "github.com/jackc/pgx/v5/pgxpool"
+    "github.com/redis/go-redis/v9"
 )
 
-type placeholderService struct{}
-
-func (placeholderService) PingContext(context.Context) error { return nil }
-func (placeholderService) Ping(context.Context) error        { return nil }
-
-func (placeholderService) CreateOrGetUser(context.Context, dto.CreateUserRequest) (*domain.User, bool, error) {
-	return nil, false, errors.New("user service not wired")
+type dbHealth struct {
+    pool *pgxpool.Pool
 }
 
-func (placeholderService) RecordConsent(context.Context, string, string, time.Time) error {
-	return errors.New("user service not wired")
+func (d dbHealth) PingContext(ctx context.Context) error {
+    return d.pool.Ping(ctx)
 }
 
-func (placeholderService) SubmitKYC(context.Context, dto.KYCSubmitRequest) error {
-	return errors.New("kyc service not wired")
+type cacheHealth struct {
+    client *redis.Client
 }
 
-func (placeholderService) GetKYCStatus(context.Context, string) (*domain.KYCDocument, error) {
-	return nil, errors.New("kyc service not wired")
-}
-
-func (placeholderService) CreateQuote(context.Context, dto.QuoteRequest) (*domain.Quote, error) {
-	return nil, errors.New("quote service not wired")
-}
-
-func (placeholderService) GetUserKYCStatus(context.Context, string) (string, error) {
-	return "NOT_STARTED", errors.New("service not wired")
-}
-
-func (placeholderService) CreateTrade(context.Context, dto.CreateTradeRequest) (*domain.Trade, error) {
-	return nil, errors.New("trade service not wired")
-}
-
-func (placeholderService) GetTrade(context.Context, string) (*domain.Trade, error) {
-	return nil, errors.New("trade service not wired")
-}
-
-func (placeholderService) AddBankAccount(context.Context, dto.AddBankAccountRequest) (*domain.BankAccount, error) {
-	return nil, errors.New("bank service not wired")
-}
-
-func (placeholderService) ListBankAccounts(context.Context, string) ([]*domain.BankAccount, error) {
-	return nil, errors.New("bank service not wired")
-}
-
-func (placeholderService) RaiseDispute(context.Context, dto.DisputeRequest) (*handlers.DisputeRecord, error) {
-	return nil, errors.New("dispute service not wired")
+func (c cacheHealth) Ping(ctx context.Context) error {
+    return c.client.Ping(ctx).Err()
 }
 
 func main() {
-	logger := slog.Default()
-	serviceToken := os.Getenv("SERVICE_TOKEN")
-	if serviceToken == "" {
-		// Dev fallback to simplify local API testing when Vault is not configured.
-		serviceToken = "your-service-token"
-	}
+    logger := slog.Default()
 
-	vaultAddr := os.Getenv("VAULT_ADDR")
-	if vaultAddr == "" {
-		vaultAddr = "http://127.0.0.1:8200"
-	}
+    dbURL := strings.TrimSpace(os.Getenv("DB_URL"))
+    if dbURL == "" {
+        logger.Error("DB_URL is required")
+        os.Exit(1)
+    }
 
-	vaultToken := os.Getenv("VAULT_TOKEN")
-	if vaultToken == "" {
-		logger.Warn("VAULT_TOKEN not set; running without Vault bootstrap", "hint", "set VAULT_TOKEN to enable provider/PII secrets")
-	} else {
-		ctx := context.Background()
-		vault := vaultclient.New(vaultAddr, vaultToken, "secret")
+    serviceToken := firstNonEmpty(strings.TrimSpace(os.Getenv("SERVICE_TOKEN")), "your-service-token")
+    redisURL := firstNonEmpty(strings.TrimSpace(os.Getenv("REDIS_URL")), "redis://:DevPassword123!@127.0.0.1:6379/0")
+    vaultAddr := firstNonEmpty(strings.TrimSpace(os.Getenv("VAULT_ADDR")), "http://127.0.0.1:8200")
+    vaultToken := strings.TrimSpace(os.Getenv("VAULT_TOKEN"))
 
-		binanceCreds, err := vault.GetSecretMap(ctx, "convertchain/binance")
-		if err != nil {
-			logger.Error("failed to load Binance creds", "error", err)
-			os.Exit(1)
-		}
+    binanceCreds := map[string]string{}
+    bybitCreds := map[string]string{}
+    graphCreds := map[string]string{}
+    var encryptor *appcrypto.PIIEncryptor
 
-		bybitCreds, err := vault.GetSecretMap(ctx, "convertchain/bybit")
-		if err != nil {
-			logger.Error("failed to load Bybit creds", "error", err)
-			os.Exit(1)
-		}
+    if vaultToken == "" {
+        logger.Warn("VAULT_TOKEN not set; using env-only local startup")
+    } else {
+        ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+        defer cancel()
 
-		graphCreds, err := vault.GetSecretMap(ctx, "convertchain/graph")
-		if err != nil {
-			logger.Error("failed to load Graph creds", "error", err)
-			os.Exit(1)
-		}
+        vault := vaultclient.New(vaultAddr, vaultToken, "secret")
+        binanceCreds = optionalSecretMap(ctx, vault, "convertchain/binance", logger)
+        bybitCreds = optionalSecretMap(ctx, vault, "convertchain/bybit", logger)
+        graphCreds = optionalSecretMap(ctx, vault, "convertchain/graph", logger)
 
-		smileCreds, err := vault.GetSecretMap(ctx, "convertchain/smileid")
-		if err != nil {
-			logger.Error("failed to load Smile ID creds", "error", err)
-			os.Exit(1)
-		}
+        if token := optionalSecret(ctx, vault, "convertchain/service_token", "token", logger); token != "" {
+            serviceToken = token
+        }
 
-		piiKeyHex, err := vault.GetSecret(ctx, "convertchain/pii_key", "key")
-		if err != nil {
-			logger.Error("failed to load PII key", "error", err)
-			os.Exit(1)
-		}
+        if piiKeyHex := optionalSecret(ctx, vault, "convertchain/pii_key", "key", logger); piiKeyHex != "" {
+            piiKeyBytes, err := hex.DecodeString(piiKeyHex)
+            if err != nil {
+                logger.Warn("failed to decode vault PII key; continuing without app-level encryption", "error", err)
+            } else {
+                encryptor, err = appcrypto.NewPIIEncryptor(piiKeyBytes)
+                if err != nil {
+                    logger.Warn("failed to initialize PII encryptor from vault key", "error", err)
+                }
+            }
+        }
+    }
 
-		piiKeyBytes, err := hex.DecodeString(piiKeyHex)
-		if err != nil {
-			logger.Error("failed to decode PII key", "error", err)
-			os.Exit(1)
-		}
+    pool, err := pgxpool.New(context.Background(), dbURL)
+    if err != nil {
+        logger.Error("failed to create postgres pool", "error", err)
+        os.Exit(1)
+    }
+    defer pool.Close()
 
-		piiEncryptor, err := crypto.NewPIIEncryptor(piiKeyBytes)
-		if err != nil {
-			logger.Error("failed to initialize PII encryptor", "error", err)
-			os.Exit(1)
-		}
+    if err := pool.Ping(context.Background()); err != nil {
+        logger.Error("failed to reach postgres", "error", err)
+        os.Exit(1)
+    }
 
-		vaultServiceToken, err := vault.GetSecret(ctx, "convertchain/service_token", "token")
-		if err != nil {
-			logger.Error("failed to load service token", "error", err)
-			os.Exit(1)
-		}
-		if vaultServiceToken != "" {
-			serviceToken = vaultServiceToken
-		}
+    redisOpts, err := redis.ParseURL(redisURL)
+    if err != nil {
+        logger.Error("failed to parse REDIS_URL", "error", err)
+        os.Exit(1)
+    }
 
-		binanceClient := binanceclient.NewClient(
-			binanceCreds["api_key"],
-			binanceCreds["api_secret"],
-			os.Getenv("BINANCE_USE_TESTNET") == "true",
-		)
+    redisClient := redis.NewClient(redisOpts)
+    defer redisClient.Close()
 
-		bybitClient := bybitclient.NewClient(
-			bybitCreds["api_key"],
-			bybitCreds["api_secret"],
-			os.Getenv("BYBIT_USE_TESTNET") == "true",
-		)
+    if err := redisClient.Ping(context.Background()).Err(); err != nil {
+        logger.Error("failed to reach redis", "error", err)
+        os.Exit(1)
+    }
 
-		graphClient := graphclient.NewClient(
-			graphCreds["api_key"],
-			os.Getenv("GRAPH_USE_SANDBOX") == "true",
-		)
+    binanceClient := binanceclient.NewClient(
+        firstNonEmpty(strings.TrimSpace(os.Getenv("BINANCE_API_KEY")), binanceCreds["api_key"]),
+        firstNonEmpty(strings.TrimSpace(os.Getenv("BINANCE_API_SECRET")), strings.TrimSpace(os.Getenv("BINANCE_SECRET_KEY")), binanceCreds["api_secret"]),
+        envBool("BINANCE_USE_TESTNET", true),
+    )
 
-		smileIDClient := smileidclient.NewClient(
-			smileCreds["partner_id"],
-			smileCreds["api_key"],
-			os.Getenv("SMILE_ID_USE_SANDBOX") == "true",
-		)
+    bybitClient := bybitclient.NewClient(
+        firstNonEmpty(strings.TrimSpace(os.Getenv("BYBIT_API_KEY")), bybitCreds["api_key"]),
+        firstNonEmpty(strings.TrimSpace(os.Getenv("BYBIT_API_SECRET")), strings.TrimSpace(os.Getenv("BYBIT_SECRET_KEY")), bybitCreds["api_secret"]),
+        envBool("BYBIT_USE_TESTNET", true),
+    )
 
-		// Keep these referenced so the file compiles until the real service wiring uses them.
-		_ = piiEncryptor
-		_ = binanceClient
-		_ = bybitClient
-		_ = graphClient
-		_ = smileIDClient
-	}
+    graphClient := graphclient.NewClient(
+        firstNonEmpty(strings.TrimSpace(os.Getenv("GRAPH_API_KEY")), graphCreds["api_key"]),
+        envBool("GRAPH_USE_SANDBOX", true),
+    )
 
-	deps := placeholderService{}
-	router := api.NewRouter(api.RouterConfig{
-		ServiceToken:   serviceToken,
-		Logger:         logger,
-		HealthHandler:  handlers.NewHealthHandler(deps, deps),
-		UserHandler:    handlers.NewUserHandler(deps),
-		KYCHandler:     handlers.NewKYCHandler(deps),
-		QuoteHandler:   handlers.NewQuoteHandler(deps),
-		TradeHandler:   handlers.NewTradeHandler(deps),
-		BankHandler:    handlers.NewBankHandler(deps),
-		DisputeHandler: handlers.NewDisputeHandler(deps),
-	})
+    pricingEngine := pricing.NewPricingEngine(binanceClient, bybitClient, graphClient, redisClient, logger)
+    appService := service.NewApplicationService(
+        pool,
+        pricingEngine,
+        graphClient,
+        encryptor,
+        logger,
+        service.Options{
+            AutoApproveKYC: envBool("AUTO_APPROVE_KYC", true),
+        },
+    )
 
-	srv := &http.Server{Addr: ":9000", Handler: router}
-	slog.Info("go engine listening", "addr", ":9000")
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		logger.Error("server stopped", "error", err)
-		os.Exit(1)
-	}
+    redisAdapter := service.NewRedisAdapter(redisClient)
+    workerCtx, workerCancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+    defer workerCancel()
+
+    depositWatcher := workers.NewDepositWatcher(
+        appService,
+        service.NewSandboxBlockchainClient(),
+        statemachine.NewTradeFSM(),
+        5*time.Second,
+        logger,
+    )
+    quoteExpiry := workers.NewQuoteExpiryWorker(appService, 15*time.Second, logger)
+    payoutProcessor := workers.NewPayoutProcessor(
+        appService,
+        service.NewGraphSandboxPayoutClient(appService, graphClient, logger),
+        5*time.Second,
+        logger,
+    )
+
+    go depositWatcher.Run(workerCtx)
+    go quoteExpiry.Run(workerCtx)
+    go payoutProcessor.Run(workerCtx)
+
+    router := api.NewRouter(api.RouterConfig{
+        ServiceToken:   serviceToken,
+        Logger:         logger,
+        RedisClient:    redisAdapter,
+        HealthHandler:  handlers.NewHealthHandler(dbHealth{pool: pool}, cacheHealth{client: redisClient}),
+        UserHandler:    handlers.NewUserHandler(appService),
+        KYCHandler:     handlers.NewKYCHandler(appService),
+        QuoteHandler:   handlers.NewQuoteHandler(appService),
+        TradeHandler:   handlers.NewTradeHandler(appService),
+        BankHandler:    handlers.NewBankHandler(appService),
+        DisputeHandler: handlers.NewDisputeHandler(appService),
+    })
+
+    srv := &http.Server{
+        Addr:    ":9000",
+        Handler: router,
+    }
+
+    go func() {
+        <-workerCtx.Done()
+        shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+        defer cancel()
+        if err := srv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+            logger.Error("graceful shutdown failed", "error", err)
+        }
+    }()
+
+    logger.Info(
+        "convertchain go engine ready",
+        "addr", ":9000",
+        "auto_approve_kyc", envBool("AUTO_APPROVE_KYC", true),
+        "graph_sandbox", graphClient.IsSandbox(),
+    )
+
+    if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+        logger.Error("server stopped unexpectedly", "error", err)
+        os.Exit(1)
+    }
+}
+
+func optionalSecret(ctx context.Context, vault *vaultclient.Client, path, field string, logger *slog.Logger) string {
+    value, err := vault.GetSecret(ctx, path, field)
+    if err != nil {
+        logger.Warn("vault secret unavailable; continuing with env fallback", "path", path, "field", field, "error", err)
+        return ""
+    }
+    return strings.TrimSpace(value)
+}
+
+func optionalSecretMap(ctx context.Context, vault *vaultclient.Client, path string, logger *slog.Logger) map[string]string {
+    values, err := vault.GetSecretMap(ctx, path)
+    if err != nil {
+        logger.Warn("vault secret map unavailable; continuing with env fallback", "path", path, "error", err)
+        return map[string]string{}
+    }
+    return values
+}
+
+func firstNonEmpty(values ...string) string {
+    for _, value := range values {
+        if strings.TrimSpace(value) != "" {
+            return strings.TrimSpace(value)
+        }
+    }
+    return ""
+}
+
+func envBool(key string, fallback bool) bool {
+    value := strings.TrimSpace(strings.ToLower(os.Getenv(key)))
+    if value == "" {
+        return fallback
+    }
+
+    switch value {
+    case "1", "true", "yes", "on":
+        return true
+    case "0", "false", "no", "off":
+        return false
+    default:
+        return fallback
+    }
 }

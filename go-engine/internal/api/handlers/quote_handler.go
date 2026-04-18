@@ -54,13 +54,14 @@ func (h *QuoteHandler) CreateQuote(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusCreated, dto.QuoteResponse{
-		QuoteID:    quote.ID.String(),
-		AmountUSDC: float64(quote.FromAmount),
-		AmountNGN:  float64(quote.NetAmount),
-		Rate:       parseFloatOrZero(quote.FiatRate),
-		Fee:        float64(quote.FeeAmount),
-		ExpiresAt:  quote.ValidUntil.Format("2006-01-02T15:04:05Z"),
-		Status:     deriveQuoteStatus(quote),
+		QuoteID:      quote.ID.String(),
+		Asset:        quote.FromCurrency,
+		Amount:       formatAmountForClient(quote.FromAmount, quote.FromCurrency),
+		Rate:         int64(parseFloatOrZero(quote.FiatRate) * 100),
+		FeeKobo:      quote.FeeAmount,
+		NetNairaKobo: quote.NetAmount,
+		ExpiresAt:    quote.ValidUntil.Format("2006-01-02T15:04:05Z"),
+		Status:       deriveQuoteStatus(quote),
 	})
 }
 
@@ -80,4 +81,22 @@ func parseFloatOrZero(raw string) float64 {
 		return 0
 	}
 	return value
+}
+
+func formatAmountForClient(amount int64, currency string) string {
+	decimals := 8
+	switch currency {
+	case "ETH":
+		decimals = 18
+	case "USDC", "USDT":
+		decimals = 6
+	case "BNB":
+		decimals = 8
+	}
+
+	divisor := 1.0
+	for i := 0; i < decimals; i++ {
+		divisor *= 10
+	}
+	return strconv.FormatFloat(float64(amount)/divisor, 'f', -1, 64)
 }

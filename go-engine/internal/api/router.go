@@ -83,6 +83,8 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 		}
 
 		if cfg.BankHandler != nil {
+			v1.GET("/banks", cfg.BankHandler.ListBanks)
+			v1.POST("/bank-accounts/resolve", cfg.BankHandler.ResolveBankAccount)
 			v1.POST("/bank-accounts", cfg.BankHandler.AddBankAccount)
 			v1.GET("/bank-accounts/:user_id", cfg.BankHandler.ListBankAccounts)
 		}

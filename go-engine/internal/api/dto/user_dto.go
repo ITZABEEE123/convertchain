@@ -1,16 +1,17 @@
 package dto
 
 type CreateUserRequest struct {
-	TelegramID  int64  `json:"telegram_id" binding:"required"`
-	Username    string `json:"username"`
-	PhoneNumber string `json:"phone_number"`
-	Locale      string `json:"locale"`
+	ChannelType   string `json:"channel_type" binding:"required,oneof=whatsapp telegram WHATSAPP TELEGRAM"`
+	ChannelUserID string `json:"channel_user_id" binding:"required"`
+	Username      string `json:"username"`
+	PhoneNumber   string `json:"phone_number"`
+	Locale        string `json:"locale"`
 }
 
 type CreateUserResponse struct {
 	UserID    string `json:"user_id"`
-	Status    string `json:"status"`    // "CREATED" or "EXISTING"
-	KYCStatus string `json:"kyc_status"` // "NOT_STARTED", "PENDING", "APPROVED", "REJECTED"
+	Status    string `json:"status"`     // "CREATED" or "EXISTING"
+	KYCStatus string `json:"kyc_status"` // "not_started", "pending", "approved", "rejected"
 }
 
 type ConsentRequest struct {

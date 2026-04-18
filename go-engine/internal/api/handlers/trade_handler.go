@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"net/http"
+	"strconv"
 
 	"convert-chain/go-engine/internal/api/dto"
 	"convert-chain/go-engine/internal/domain"
@@ -86,25 +87,37 @@ func tradeToResponse(t *domain.Trade) dto.TradeResponse {
 		payoutRef = *t.GraphPayoutID
 	}
 
-	amountNGN := t.ToAmountExpected
-	if t.ToAmountActual != nil {
-		amountNGN = *t.ToAmountActual
+	return dto.TradeResponse{
+		TradeID:               t.ID.String(),
+		UserID:                t.UserID.String(),
+		Status:                t.Status,
+		DepositAddress:        depositAddress,
+		DepositAmount:         formatTradeAmount(t.FromAmount, t.FromCurrency),
+		Asset:                 t.FromCurrency,
+		ExpiresAt:             t.ExpiresAt.Format("2006-01-02T15:04:05Z"),
+		CreatedAt:             t.CreatedAt.Format("2006-01-02T15:04:05Z"),
+		UpdatedAt:             t.UpdatedAt.Format("2006-01-02T15:04:05Z"),
+		TxHash:                txHash,
+		PayoutRef:             payoutRef,
+		Confirmations:         t.Confirmations,
+		RequiredConfirmations: 2,
+	}
+}
+
+func formatTradeAmount(amount int64, currency string) string {
+	decimals := 8
+	switch currency {
+	case "ETH":
+		decimals = 18
+	case "USDC", "USDT":
+		decimals = 6
+	case "BNB":
+		decimals = 8
 	}
 
-	return dto.TradeResponse{
-		TradeID:        t.ID.String(),
-		UserID:         t.UserID.String(),
-		Status:         t.Status,
-		DepositAddress: depositAddress,
-		DepositNetwork: "",
-		AmountUSDC:     float64(t.FromAmount),
-		AmountNGN:      float64(amountNGN),
-		Rate:           0,
-		Fee:            float64(t.FeeAmount),
-		ExpiresAt:      t.ExpiresAt.Format("2006-01-02T15:04:05Z"),
-		CreatedAt:      t.CreatedAt.Format("2006-01-02T15:04:05Z"),
-		UpdatedAt:      t.UpdatedAt.Format("2006-01-02T15:04:05Z"),
-		TxHash:         txHash,
-		PayoutRef:      payoutRef,
+	divisor := 1.0
+	for i := 0; i < decimals; i++ {
+		divisor *= 10
 	}
+	return strconv.FormatFloat(float64(amount)/divisor, 'f', -1, 64)
 }
