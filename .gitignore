@@ -2,6 +2,9 @@
 .env
 .env.*
 !.env.example
+docker-compose.yml
+.env.example
+python-bot/.env.example
 
 # Go
 go-engine/vendor/
