@@ -6,6 +6,7 @@
 # Go
 go-engine/vendor/
 go-engine/tmp/
+tmp/
 
 # Python
 python-bot/.venv/
