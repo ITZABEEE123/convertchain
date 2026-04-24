@@ -54,14 +54,22 @@ func (h *QuoteHandler) CreateQuote(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusCreated, dto.QuoteResponse{
-		QuoteID:      quote.ID.String(),
-		Asset:        quote.FromCurrency,
-		Amount:       formatAmountForClient(quote.FromAmount, quote.FromCurrency),
-		Rate:         int64(parseFloatOrZero(quote.FiatRate) * 100),
-		FeeKobo:      quote.FeeAmount,
-		NetNairaKobo: quote.NetAmount,
-		ExpiresAt:    quote.ValidUntil.Format("2006-01-02T15:04:05Z"),
-		Status:       deriveQuoteStatus(quote),
+		QuoteID:               quote.ID.String(),
+		Asset:                 quote.FromCurrency,
+		Amount:                formatAmountForClient(quote.FromAmount, quote.FromCurrency),
+		Rate:                  quote.UserRatePerUnitKobo,
+		FeeKobo:               quote.FeeAmount,
+		NetNairaKobo:          quote.NetAmount,
+		GrossNairaKobo:        quote.ToAmount,
+		PlatformFeeKobo:       quote.FeeAmount,
+		PlatformFeeBPS:        quote.FeeBPS,
+		MarketRatePerUnitKobo: quote.MarketRatePerUnitKobo,
+		UserRatePerUnitKobo:   quote.UserRatePerUnitKobo,
+		PricingMode:           quote.PricingMode,
+		PriceSource:           quote.PriceSource,
+		FiatRateSource:        quote.FiatRateSource,
+		ExpiresAt:             quote.ValidUntil.Format("2006-01-02T15:04:05Z"),
+		Status:                deriveQuoteStatus(quote),
 	})
 }
 
@@ -73,14 +81,6 @@ func deriveQuoteStatus(quote *domain.Quote) string {
 		return "QUOTE_ACCEPTED"
 	}
 	return "QUOTE_PROVIDED"
-}
-
-func parseFloatOrZero(raw string) float64 {
-	value, err := strconv.ParseFloat(raw, 64)
-	if err != nil {
-		return 0
-	}
-	return value
 }
 
 func formatAmountForClient(amount int64, currency string) string {

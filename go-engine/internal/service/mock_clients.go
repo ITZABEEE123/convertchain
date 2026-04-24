@@ -56,3 +56,7 @@ func NewMockGraphFinanceClient() *MockGraphFinanceClient {
 func (m *MockGraphFinanceClient) ConvertAndPay(_ context.Context, bankAccountID string, payoutAmount int64) (string, error) {
 	return fmt.Sprintf("mock_payout_%s_%d_%d", bankAccountID, payoutAmount, time.Now().Unix()), nil
 }
+
+func (m *MockGraphFinanceClient) GetPayoutStatus(_ context.Context, _ string) (string, error) {
+	return "completed", nil
+}

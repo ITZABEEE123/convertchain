@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -126,6 +127,7 @@ async def test_start_resumes_verified_user(onboarding_flow, mock_session_service
     mock_engine_client.get_kyc_status = AsyncMock(return_value={
         "kyc_status": "approved",
         "tier": 1,
+        "transaction_password_set": True,
     })
 
     result = await onboarding_flow.start(
@@ -148,6 +150,7 @@ async def test_collect_bvn_recovers_when_user_is_already_approved(onboarding_flo
     mock_engine_client.get_kyc_status = AsyncMock(return_value={
         "kyc_status": "approved",
         "tier": 1,
+        "transaction_password_set": True,
     })
 
     await mock_session_service.set("+2348012345678", {
@@ -177,6 +180,121 @@ async def test_collect_bvn_recovers_when_user_is_already_approved(onboarding_flo
     assert updated_session["step"] is None
     assert updated_session["flow"] is None
     assert "already verified" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_collect_bvn_starts_transaction_password_when_kyc_is_immediately_approved(
+    onboarding_flow,
+    mock_session_service,
+    mock_engine_client,
+):
+    mock_engine_client.submit_kyc = AsyncMock(
+        return_value={"kyc_id": "kyc_test456", "status": "APPROVED"}
+    )
+
+    await mock_session_service.set("+2348012345678", {
+        "flow": "onboarding",
+        "step": "COLLECT_BVN",
+        "engine_user_id": "usr_test123",
+        "channel": "whatsapp",
+        "data": {
+            "phone": "+2348012345678",
+            "first_name": "John",
+            "last_name": "Doe",
+            "date_of_birth": "1990-01-15",
+            "nin": "12345678901",
+        },
+    })
+
+    session = await mock_session_service.get("+2348012345678")
+    result = await onboarding_flow.handle_step(
+        user_id="+2348012345678",
+        session=session,
+        text="22345678901",
+        image_id=None,
+    )
+
+    updated_session = await mock_session_service.get("+2348012345678")
+    assert updated_session["step"] == "SET_TX_PASSWORD"
+    assert updated_session["flow"] == "onboarding"
+    assert "transaction password" in result.lower()
+    assert "step 7 of 9" in result.lower()
+    assert "step 8 of 9" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_collect_bvn_returns_immediate_rejection_reason(
+    onboarding_flow,
+    mock_session_service,
+    mock_engine_client,
+):
+    mock_engine_client.submit_kyc = AsyncMock(
+        return_value={
+            "kyc_id": "kyc_test456",
+            "status": "REJECTED",
+            "rejection_reason": "Name does not match BVN records",
+        }
+    )
+
+    await mock_session_service.set("+2348012345678", {
+        "flow": "onboarding",
+        "step": "COLLECT_BVN",
+        "engine_user_id": "usr_test123",
+        "channel": "whatsapp",
+        "data": {
+            "phone": "+2348012345678",
+            "first_name": "John",
+            "last_name": "Doe",
+            "date_of_birth": "1990-01-15",
+            "nin": "12345678901",
+        },
+    })
+
+    session = await mock_session_service.get("+2348012345678")
+    result = await onboarding_flow.handle_step(
+        user_id="+2348012345678",
+        session=session,
+        text="22345678901",
+        image_id=None,
+    )
+
+    updated_session = await mock_session_service.get("+2348012345678")
+    assert updated_session == {}
+    assert "name does not match bvn records" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_confirm_transaction_password_reports_final_setup_step(
+    onboarding_flow,
+    mock_session_service,
+    mock_engine_client,
+):
+    mock_engine_client.setup_transaction_password = AsyncMock(return_value={"configured": True})
+
+    await mock_session_service.set("+2348012345678", {
+        "flow": "onboarding",
+        "step": "CONFIRM_TX_PASSWORD",
+        "engine_user_id": "usr_test123",
+        "channel": "whatsapp",
+        "data": {
+            "first_name": "John",
+            "pending_transaction_password": "secret123",
+            "tx_password_started_at": datetime.now(timezone.utc).isoformat(),
+        },
+    })
+
+    session = await mock_session_service.get("+2348012345678")
+    result = await onboarding_flow.handle_step(
+        user_id="+2348012345678",
+        session=session,
+        text="secret123",
+        image_id=None,
+    )
+
+    updated_session = await mock_session_service.get("+2348012345678")
+    assert updated_session["onboarded"] is True
+    assert updated_session["step"] is None
+    assert "step 9 of 9" in result.lower()
 
 
 @pytest.mark.asyncio
@@ -377,6 +495,7 @@ async def test_kyc_submitted_approved(onboarding_flow, mock_session_service, moc
     mock_engine_client.get_kyc_status = AsyncMock(return_value={
         "kyc_status": "approved",
         "tier": 1,
+        "transaction_password_set": True,
     })
 
     await mock_session_service.set("+2348012345678", {

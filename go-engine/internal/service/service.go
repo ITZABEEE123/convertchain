@@ -4,6 +4,7 @@ import (
 	"log/slog"
 
 	appcrypto "convert-chain/go-engine/internal/crypto"
+	"convert-chain/go-engine/internal/exchange"
 	graphclient "convert-chain/go-engine/internal/graph"
 	"convert-chain/go-engine/internal/kyc"
 	"convert-chain/go-engine/internal/pricing"
@@ -13,16 +14,21 @@ import (
 )
 
 type Options struct {
-	AutoApproveKYC      bool
-	SmileIDPartnerID    string
-	SmileIDAPIKey       string
-	SumsubWebhookSecret string
+	AutoApproveKYC           bool
+	SmileIDPartnerID         string
+	SmileIDAPIKey            string
+	SumsubWebhookSecret      string
+	GraphWebhookSecret       string
+	GraphWebhookPublicBaseURL string
+	BybitFallbackEnabled     bool
 }
 
 type ApplicationService struct {
 	db              *pgxpool.Pool
 	pricingEngine   *pricing.PricingEngine
 	graph           *graphclient.Client
+	primaryExchange exchange.ExchangeClient
+	fallbackExchange exchange.ExchangeClient
 	encryptor       *appcrypto.PIIEncryptor
 	logger          *slog.Logger
 	userFSM         *statemachine.UserFSM
@@ -34,18 +40,22 @@ func NewApplicationService(
 	db *pgxpool.Pool,
 	pricingEngine *pricing.PricingEngine,
 	graph *graphclient.Client,
+	primaryExchange exchange.ExchangeClient,
+	fallbackExchange exchange.ExchangeClient,
 	encryptor *appcrypto.PIIEncryptor,
 	logger *slog.Logger,
 	options Options,
 ) *ApplicationService {
 	return &ApplicationService{
-		db:            db,
-		pricingEngine: pricingEngine,
-		graph:         graph,
-		encryptor:     encryptor,
-		logger:        logger,
-		userFSM:       statemachine.NewUserFSM(),
-		options:       options,
+		db:               db,
+		pricingEngine:    pricingEngine,
+		graph:            graph,
+		primaryExchange:  primaryExchange,
+		fallbackExchange: fallbackExchange,
+		encryptor:        encryptor,
+		logger:           logger,
+		userFSM:          statemachine.NewUserFSM(),
+		options:          options,
 	}
 }
 

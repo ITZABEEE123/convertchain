@@ -32,11 +32,19 @@ func NewKYCOrchestrator(
 }
 
 func (o *KYCOrchestrator) SupportsTier1() bool {
-	return o != nil && o.smileID != nil
+	return o != nil && o.smileID != nil && o.smileID.Enabled()
 }
 
 func (o *KYCOrchestrator) SupportsTier2() bool {
 	return o != nil && o.sumsub != nil && o.sumsub.Enabled()
+}
+
+func (o *KYCOrchestrator) VerifySmileIDCallback(signature, timestamp string) bool {
+	return o != nil && o.smileID != nil && o.smileID.VerifyCallbackSignature(signature, timestamp)
+}
+
+func (o *KYCOrchestrator) VerifySumsubWebhook(payload []byte, digest, algorithm, webhookSecret string) bool {
+	return o != nil && o.sumsub != nil && o.sumsub.VerifyWebhookSignature(payload, digest, algorithm, webhookSecret)
 }
 
 func (o *KYCOrchestrator) SubmitTier1KYC(ctx context.Context, req Tier1KYCRequest) (*KYCResult, error) {
@@ -56,11 +64,21 @@ func (o *KYCOrchestrator) SubmitTier1KYC(ctx context.Context, req Tier1KYCReques
 	bvnResult, err := o.smileID.LookupBVN(ctx, smileid.BVNLookupRequest{
 		BVN:         req.BVN,
 		FirstName:   req.FirstName,
+		MiddleName:  "",
 		LastName:    req.LastName,
 		DateOfBirth: req.DateOfBirth,
+		PhoneNumber: req.PhoneNumber,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("BVN lookup failed: %w", err)
+	}
+	if !bvnResult.Verified {
+		return &KYCResult{
+			Status:   "REJECTED",
+			Tier:     "TIER_0",
+			Provider: "smile_id",
+			Reason:   firstNonEmptyReason(bvnResult.Reason, "BVN could not be verified"),
+		}, nil
 	}
 	if !bvnResult.NameMatch {
 		return &KYCResult{
@@ -70,8 +88,23 @@ func (o *KYCOrchestrator) SubmitTier1KYC(ctx context.Context, req Tier1KYCReques
 			Reason:   "Name does not match BVN records",
 		}, nil
 	}
+	if req.DateOfBirth != "" && !bvnResult.DOBMatch {
+		return &KYCResult{
+			Status:   "REJECTED",
+			Tier:     "TIER_0",
+			Provider: "smile_id",
+			Reason:   "Date of birth does not match BVN records",
+		}, nil
+	}
 
-	ninResult, err := o.smileID.LookupNIN(ctx, smileid.NINLookupRequest{NIN: req.NIN})
+	ninResult, err := o.smileID.LookupNIN(ctx, smileid.NINLookupRequest{
+		NIN:         req.NIN,
+		FirstName:   req.FirstName,
+		MiddleName:  "",
+		LastName:    req.LastName,
+		DateOfBirth: req.DateOfBirth,
+		PhoneNumber: req.PhoneNumber,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("NIN lookup failed: %w", err)
 	}
@@ -80,7 +113,23 @@ func (o *KYCOrchestrator) SubmitTier1KYC(ctx context.Context, req Tier1KYCReques
 			Status:   "REJECTED",
 			Tier:     "TIER_0",
 			Provider: "smile_id",
-			Reason:   "NIN not found or invalid",
+			Reason:   firstNonEmptyReason(ninResult.Reason, "NIN not found or invalid"),
+		}, nil
+	}
+	if !ninResult.NameMatch && ninResult.FullName != "" {
+		return &KYCResult{
+			Status:   "REJECTED",
+			Tier:     "TIER_0",
+			Provider: "smile_id",
+			Reason:   "Name does not match NIN records",
+		}, nil
+	}
+	if req.DateOfBirth != "" && !ninResult.DOBMatch && ninResult.DateOfBirth != "" {
+		return &KYCResult{
+			Status:   "REJECTED",
+			Tier:     "TIER_0",
+			Provider: "smile_id",
+			Reason:   "Date of birth does not match NIN records",
 		}, nil
 	}
 	if ninResult.DateOfBirth != "" && bvnResult.DateOfBirth != "" && ninResult.DateOfBirth != bvnResult.DateOfBirth {
@@ -97,6 +146,15 @@ func (o *KYCOrchestrator) SubmitTier1KYC(ctx context.Context, req Tier1KYCReques
 		Tier:     "TIER_1",
 		Provider: "smile_id",
 	}, nil
+}
+
+func firstNonEmptyReason(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func (o *KYCOrchestrator) SubmitTier2KYC(ctx context.Context, req Tier2KYCRequest) (*KYCResult, error) {

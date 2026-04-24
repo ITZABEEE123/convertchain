@@ -103,6 +103,7 @@ func (h *KYCHandler) toStatusResponse(userID string, summary *domain.KYCStatusSu
 	resp.KYCStatus = summary.Status
 	resp.Provider = summary.Provider
 	resp.Tier = summary.Tier
+	resp.TransactionPasswordSet = summary.TransactionPasswordSet
 	if summary.SubmittedAt != nil {
 		resp.SubmittedAt = summary.SubmittedAt.UTC().Format(time.RFC3339)
 	}

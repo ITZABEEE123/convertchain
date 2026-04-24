@@ -32,7 +32,7 @@ def mock_session_service():
 async def test_greeting_resets_stale_onboarding_session_for_verified_user(mock_session_service):
     engine = MagicMock()
     engine.create_user = AsyncMock(return_value={"user_id": "usr_test123"})
-    engine.get_kyc_status = AsyncMock(return_value={"kyc_status": "approved", "tier": 1})
+    engine.get_kyc_status = AsyncMock(return_value={"kyc_status": "approved", "tier": 1, "transaction_password_set": True})
 
     await mock_session_service.set(
         "5827695262",
@@ -79,6 +79,7 @@ async def test_completed_onboarding_session_routes_help_for_verified_user(mock_s
             "engine_user_id": "usr_test123",
             "channel": "telegram",
             "onboarded": True,
+            "transaction_password_set": True,
             "data": {"first_name": "John"},
         },
     )
@@ -122,6 +123,12 @@ async def test_completed_onboarding_session_routes_sell_for_verified_user(mock_s
             "rate": 6543210000,
             "net_naira_kobo": 1627623487,
             "fee_kobo": 8179013,
+            "gross_naira_kobo": 1635802500,
+            "platform_fee_kobo": 8179013,
+            "platform_fee_bps": 50,
+            "market_rate_per_unit_kobo": 6600000000,
+            "user_rate_per_unit_kobo": 6543210000,
+            "pricing_mode": "live",
             "expires_at": "2026-04-18T22:00:00Z",
         }
     )
@@ -134,6 +141,7 @@ async def test_completed_onboarding_session_routes_sell_for_verified_user(mock_s
             "engine_user_id": "usr_test123",
             "channel": "telegram",
             "onboarded": True,
+            "transaction_password_set": True,
             "data": {"first_name": "John"},
         },
     )
@@ -165,6 +173,7 @@ async def test_verified_user_can_start_add_bank_flow(mock_session_service):
             "engine_user_id": "usr_test123",
             "channel": "telegram",
             "onboarded": True,
+            "transaction_password_set": True,
             "data": {"first_name": "John"},
         },
     )

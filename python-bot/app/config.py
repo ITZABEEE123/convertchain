@@ -11,6 +11,8 @@ class Settings(BaseSettings):
 
     engine_url: AnyHttpUrl = "http://localhost:9000"
     service_token: str
+    admin_api_token: str | None = None
+    admin_telegram_user_ids: str = ""
 
     redis_url: str = "redis://localhost:6379/0"
 
@@ -59,6 +61,14 @@ class Settings(BaseSettings):
     @property
     def openclaw_enabled(self) -> bool:
         return self.telegram_uses_openclaw or self.whatsapp_openclaw_enabled
+
+    @property
+    def admin_telegram_user_id_set(self) -> set[str]:
+        return {
+            item.strip()
+            for item in self.admin_telegram_user_ids.split(",")
+            if item.strip()
+        }
 
     @field_validator("environment")
     @classmethod

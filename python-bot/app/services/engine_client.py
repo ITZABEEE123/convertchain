@@ -15,14 +15,23 @@ RETRY_BASE_DELAY_SECONDS = 0.5
 
 
 class EngineError(Exception):
-    def __init__(self, message: str, status_code: int | None = None):
+    def __init__(
+        self,
+        message: str,
+        status_code: int | None = None,
+        code: str | None = None,
+        details: Any | None = None,
+    ):
         super().__init__(message)
         self.status_code = status_code
+        self.code = code
+        self.details = details
 
 
 class EngineClient:
-    def __init__(self, base_url: str, service_token: str):
+    def __init__(self, base_url: str, service_token: str, admin_token: str | None = None):
         self._base_url = base_url.rstrip("/")
+        self._admin_token = (admin_token or "").strip()
         self._client = httpx.AsyncClient(
             base_url=self._base_url,
             headers={
@@ -50,12 +59,19 @@ class EngineClient:
         *,
         json: dict | None = None,
         params: dict | None = None,
+        headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         last_exception: Exception | None = None
 
         for attempt in range(1, MAX_RETRIES + 1):
             try:
-                response = await self._client.request(method=method, url=path, json=json, params=params)
+                response = await self._client.request(
+                    method=method,
+                    url=path,
+                    json=json,
+                    params=params,
+                    headers=headers,
+                )
 
                 try:
                     response_body = response.json()
@@ -67,9 +83,13 @@ class EngineClient:
 
                 if response.is_client_error:
                     error_message = self._extract_error_message(response_body)
+                    error_code = self._extract_error_code(response_body)
+                    error_details = self._extract_error_details(response_body)
                     raise EngineError(
                         f"Engine returned {response.status_code}: {error_message}",
                         status_code=response.status_code,
+                        code=error_code,
+                        details=error_details,
                     )
 
                 last_exception = EngineError(
@@ -88,6 +108,11 @@ class EngineClient:
 
         raise last_exception or EngineError("All retries exhausted")
 
+    def _admin_headers(self) -> dict[str, str]:
+        if not self._admin_token:
+            raise EngineError("Admin API token is not configured for this bot instance.")
+        return {"X-Admin-Token": self._admin_token}
+
     @staticmethod
     def _extract_error_message(payload: dict[str, Any]) -> str:
         error_block = payload.get("error")
@@ -96,6 +121,24 @@ class EngineClient:
         if isinstance(error_block, str):
             return error_block
         return str(payload.get("message") or payload.get("detail") or "Client error")
+
+    @staticmethod
+    def _extract_error_code(payload: dict[str, Any]) -> str | None:
+        error_block = payload.get("error")
+        if isinstance(error_block, dict):
+            raw = error_block.get("code")
+            return str(raw).strip() if raw is not None else None
+        raw = payload.get("code")
+        if raw is None:
+            return None
+        return str(raw).strip() or None
+
+    @staticmethod
+    def _extract_error_details(payload: dict[str, Any]) -> Any | None:
+        error_block = payload.get("error")
+        if isinstance(error_block, dict):
+            return error_block.get("details")
+        return payload.get("details")
 
     async def create_user(self, channel_type: str, channel_user_id: str) -> dict[str, Any]:
         return await self._request(
@@ -142,12 +185,23 @@ class EngineClient:
 
     async def create_trade(self, data: dict[str, Any]) -> dict[str, Any]:
         result = await self._request("POST", "/api/v1/trades", json=data)
-        result["status"] = self._normalize_trade_status(result.get("status"))
+        raw_status = str(result.get("status") or "").upper()
+        result["raw_status"] = raw_status
+        result["status"] = self._normalize_trade_status(raw_status)
+        return result
+
+    async def confirm_trade(self, data: dict[str, Any]) -> dict[str, Any]:
+        result = await self._request("POST", "/api/v1/trades/confirm", json=data)
+        raw_status = str(result.get("status") or "").upper()
+        result["raw_status"] = raw_status
+        result["status"] = self._normalize_trade_status(raw_status)
         return result
 
     async def get_trade_status(self, trade_id: str) -> dict[str, Any]:
         result = await self._request("GET", f"/api/v1/trades/{trade_id}")
-        normalized_status = self._normalize_trade_status(result.get("status"))
+        raw_status = str(result.get("status") or "").upper()
+        normalized_status = self._normalize_trade_status(raw_status)
+        result["raw_status"] = raw_status
         result["status"] = normalized_status
 
         if not result.get("required_confirmations"):
@@ -156,6 +210,25 @@ class EngineClient:
             result["confirmations"] = self._default_confirmations_for_status(normalized_status)
 
         return result
+
+    async def get_trade_status_context(self, user_id: str) -> dict[str, Any]:
+        result = await self._request("GET", f"/api/v1/users/{user_id}/trades/status-context")
+        trade = result.get("trade")
+        if isinstance(trade, dict):
+            raw_status = str(trade.get("status") or "").upper()
+            trade["raw_status"] = raw_status
+            trade["status"] = self._normalize_trade_status(raw_status)
+        return result
+
+    async def get_latest_active_trade(self, user_id: str) -> dict[str, Any]:
+        result = await self._request("GET", f"/api/v1/users/{user_id}/trades/active")
+        raw_status = str(result.get("status") or "").upper()
+        result["raw_status"] = raw_status
+        result["status"] = self._normalize_trade_status(raw_status)
+        return result
+
+    async def get_trade_receipt(self, trade_id: str) -> dict[str, Any]:
+        return await self._request("GET", f"/api/v1/trades/{trade_id}/receipt")
 
     async def list_banks(self) -> dict[str, Any]:
         return await self._request("GET", "/api/v1/banks")
@@ -172,6 +245,80 @@ class EngineClient:
     async def raise_dispute(self, data: dict[str, Any]) -> dict[str, Any]:
         return await self._request("POST", "/api/v1/disputes", json=data)
 
+    async def setup_transaction_password(self, data: dict[str, Any]) -> dict[str, Any]:
+        return await self._request("POST", "/api/v1/security/transaction-password/setup", json=data)
+
+    async def get_deletion_quota(self, user_id: str) -> dict[str, Any]:
+        return await self._request("GET", f"/api/v1/account/delete/quota/{user_id}")
+
+    async def delete_account(self, data: dict[str, Any]) -> dict[str, Any]:
+        return await self._request("POST", "/api/v1/account/delete", json=data)
+
+    async def get_pending_notifications(self, channel: str, limit: int = 50) -> dict[str, Any]:
+        return await self._request("GET", "/api/v1/notifications/pending", params={"channel": channel, "limit": limit})
+
+    async def ack_notification(
+        self,
+        notification_id: str,
+        *,
+        delivered: bool,
+        delivery_error: str = "",
+        claim_token: str = "",
+    ) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            f"/api/v1/notifications/{notification_id}/ack",
+            json={
+                "delivered": delivered,
+                "delivery_error": delivery_error,
+                "claim_token": claim_token,
+            },
+        )
+
+    async def list_admin_disputes(self, *, status: str | None = None, limit: int = 20) -> dict[str, Any]:
+        params = {"limit": limit}
+        if status:
+            params["status"] = status
+        return await self._request(
+            "GET",
+            "/api/v1/admin/disputes",
+            params=params,
+            headers=self._admin_headers(),
+        )
+
+    async def get_admin_dispute(self, identifier: str) -> dict[str, Any]:
+        return await self._request(
+            "GET",
+            f"/api/v1/admin/disputes/{identifier}",
+            headers=self._admin_headers(),
+        )
+
+    async def resolve_admin_dispute(
+        self,
+        identifier: str,
+        *,
+        resolution_mode: str,
+        resolution_note: str = "",
+        resolver: str = "",
+    ) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            f"/api/v1/admin/disputes/{identifier}/resolve",
+            json={
+                "resolution_mode": resolution_mode,
+                "resolution_note": resolution_note,
+                "resolver": resolver,
+            },
+            headers=self._admin_headers(),
+        )
+
+    async def get_provider_readiness(self) -> dict[str, Any]:
+        return await self._request(
+            "GET",
+            "/api/v1/admin/providers/readiness",
+            headers=self._admin_headers(),
+        )
+
     @staticmethod
     def _normalize_trade_status(status: str | None) -> str:
         normalized = str(status or "").upper()
@@ -179,16 +326,18 @@ class EngineClient:
             "PENDING_DEPOSIT": "awaiting_deposit",
             "DEPOSIT_RECEIVED": "deposit_detected",
             "DEPOSIT_DETECTED": "deposit_detected",
-            "DEPOSIT_CONFIRMED": "confirming",
-            "CONVERSION_IN_PROGRESS": "confirming",
-            "CONVERSION_COMPLETED": "confirming",
-            "PAYOUT_PENDING": "confirming",
+            "DEPOSIT_CONFIRMED": "deposit_confirmed",
+            "CONVERSION_IN_PROGRESS": "conversion_in_progress",
+            "CONVERSION_COMPLETED": "conversion_completed",
+            "PAYOUT_PENDING": "payout_processing",
             "PAYOUT_COMPLETED": "settled",
             "COMPLETED": "settled",
             "CANCELLED": "failed",
+            "PAYOUT_FAILED": "failed",
             "QUOTE_EXPIRED": "failed",
             "FAILED": "failed",
-            "DISPUTE": "failed",
+            "DISPUTE": "needs_attention",
+            "DISPUTE_CLOSED": "closed_without_payout",
         }.get(normalized, normalized.lower())
 
     @staticmethod
@@ -196,7 +345,11 @@ class EngineClient:
         return {
             "awaiting_deposit": 0,
             "deposit_detected": 1,
-            "confirming": 2,
+            "deposit_confirmed": 2,
+            "conversion_in_progress": 2,
+            "conversion_completed": 2,
+            "payout_processing": 2,
             "settled": 2,
             "failed": 0,
+            "needs_attention": 2,
         }.get(status, 0)

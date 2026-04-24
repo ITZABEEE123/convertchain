@@ -40,6 +40,7 @@ def mock_engine_client():
     engine.list_banks = AsyncMock(
         return_value={
             "banks": [
+                {"bank_code": "000000", "bank_name": "Sandbox Test Bank"},
                 {"bank_code": "011", "bank_name": "First Bank of Nigeria"},
                 {"bank_code": "033", "bank_name": "United Bank For Africa"},
                 {"bank_code": "044", "bank_name": "Access Bank"},
@@ -125,6 +126,25 @@ async def test_collect_bank_code_advances_to_account_number(bank_flow, mock_sess
     assert saved["step"] == STEP_COLLECT_ACCOUNT_NUMBER
     assert saved["bank_data"]["bank_code"] == "058"
     assert saved["bank_data"]["bank_name"] == "Guaranty Trust Bank"
+    assert "account number" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_collect_sandbox_bank_code_advances_to_account_number(bank_flow, mock_session_service):
+    session = {
+        "onboarded": True,
+        "engine_user_id": "usr_123",
+        "flow": "bank",
+        "step": STEP_COLLECT_BANK_CODE,
+        "bank_data": {},
+    }
+
+    result = await bank_flow.handle_step("user-1", session, "000000")
+
+    saved = await mock_session_service.get("user-1")
+    assert saved["step"] == STEP_COLLECT_ACCOUNT_NUMBER
+    assert saved["bank_data"]["bank_code"] == "000000"
+    assert saved["bank_data"]["bank_name"] == "Sandbox Test Bank"
     assert "account number" in result.lower()
 
 

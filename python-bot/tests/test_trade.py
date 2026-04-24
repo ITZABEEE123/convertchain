@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.flows.trade import STEP_AWAITING_CONFIRMATION, STEP_AWAITING_DEPOSIT, TradeFlow
+from app.flows.trade import STEP_AWAITING_CONFIRMATION, STEP_AWAITING_DEPOSIT, STEP_AWAITING_TRANSACTION_PASSWORD, TradeFlow
 from app.services.engine_client import EngineError
 
 
@@ -52,10 +52,16 @@ def mock_engine_client():
             "rate": 6543210000,
             "net_naira_kobo": 1627623487,
             "fee_kobo": 8179013,
+            "gross_naira_kobo": 1635802500,
+            "platform_fee_kobo": 8179013,
+            "platform_fee_bps": 50,
+            "market_rate_per_unit_kobo": 6600000000,
+            "user_rate_per_unit_kobo": 6543210000,
+            "pricing_mode": "live",
             "expires_at": "2026-04-18T12:00:30Z",
         }
     )
-    engine.create_trade = AsyncMock(
+    engine.confirm_trade = AsyncMock(
         return_value={
             "trade_id": "trd_test012",
             "status": "awaiting_deposit",
@@ -63,6 +69,21 @@ def mock_engine_client():
             "deposit_amount": "0.25",
             "asset": "BTC",
             "expires_at": "2026-04-18T13:00:00Z",
+        }
+    )
+    engine.get_trade_receipt = AsyncMock(
+        return_value={
+            "trade_id": "trd_test012",
+            "trade_ref": "TRD-TEST012",
+            "status": "PAYOUT_COMPLETED",
+            "pricing_mode": "sandbox_live_rates",
+            "payout_amount_kobo": 1627623487,
+            "fee_amount_kobo": 8179013,
+            "bank_name": "Access Bank",
+            "masked_account_number": "******6789",
+            "payout_ref": "pay_test_123",
+            "created_at": "2026-04-18T12:00:00Z",
+            "payout_completed_at": "2026-04-18T12:05:00Z",
         }
     )
     engine.get_trade_status = AsyncMock(
@@ -87,6 +108,7 @@ def onboarded_session():
         "flow": None,
         "step": None,
         "onboarded": True,
+        "transaction_password_set": True,
         "engine_user_id": "usr_test123",
         "data": {"first_name": "John", "last_name": "Oluwaseun", "phone": "+2348012345678"},
     }
@@ -191,9 +213,11 @@ async def test_confirm_creates_sandbox_trade(trade_flow, mock_session_service, o
             "quote_id": "qte_test456",
             "asset": "BTC",
             "amount": "0.25",
-            "rate_kobo": 6543210000,
+            "market_rate_per_unit_kobo": 6600000000,
+            "user_rate_per_unit_kobo": 6543210000,
             "net_naira_kobo": 1627623487,
-            "fee_kobo": 8179013,
+            "platform_fee_kobo": 8179013,
+            "platform_fee_bps": 50,
             "expires_at": "2099-01-01T12:00:30Z",
             "bank_account_id": "bnk_test789",
             "trade_id": None,
@@ -203,8 +227,14 @@ async def test_confirm_creates_sandbox_trade(trade_flow, mock_session_service, o
 
     session = await mock_session_service.get("+2348012345678")
     result = await trade_flow.handle_step("+2348012345678", session, "CONFIRM")
+    assert "transaction password" in result.lower()
 
-    mock_engine_client.create_trade.assert_called_once()
+    updated = await mock_session_service.get("+2348012345678")
+    assert updated["step"] == STEP_AWAITING_TRANSACTION_PASSWORD
+
+    result = await trade_flow.handle_step("+2348012345678", updated, "secret123")
+
+    mock_engine_client.confirm_trade.assert_called_once()
     updated = await mock_session_service.get("+2348012345678")
     assert updated["trade_data"]["trade_id"] == "trd_test012"
     assert updated["trade_data"]["deposit_mode"] == "sandbox"
@@ -215,7 +245,7 @@ async def test_confirm_creates_sandbox_trade(trade_flow, mock_session_service, o
 
 @pytest.mark.asyncio
 async def test_confirm_expired_quote(trade_flow, mock_session_service, mock_engine_client, onboarded_session):
-    mock_engine_client.create_trade = AsyncMock(side_effect=EngineError("Quote expired", status_code=409))
+    mock_engine_client.confirm_trade = AsyncMock(side_effect=EngineError("Quote expired", status_code=409))
     session_with_quote = {
         **onboarded_session,
         "flow": "trade",
@@ -224,9 +254,10 @@ async def test_confirm_expired_quote(trade_flow, mock_session_service, mock_engi
             "quote_id": "qte_expired",
             "asset": "BTC",
             "amount": "0.25",
-            "rate_kobo": 6543210000,
+            "market_rate_per_unit_kobo": 6600000000,
+            "user_rate_per_unit_kobo": 6543210000,
             "net_naira_kobo": 1627623487,
-            "fee_kobo": 8179013,
+            "platform_fee_kobo": 8179013,
             "expires_at": "2020-01-01T00:00:00Z",
             "bank_account_id": "bnk_test789",
             "trade_id": None,
@@ -235,7 +266,9 @@ async def test_confirm_expired_quote(trade_flow, mock_session_service, mock_engi
     await mock_session_service.set("+2348012345678", session_with_quote)
 
     session = await mock_session_service.get("+2348012345678")
-    result = await trade_flow.handle_step("+2348012345678", session, "CONFIRM")
+    await trade_flow.handle_step("+2348012345678", session, "CONFIRM")
+    updated = await mock_session_service.get("+2348012345678")
+    result = await trade_flow.handle_step("+2348012345678", updated, "secret123")
 
     assert "expired" in result.lower()
 
@@ -252,6 +285,7 @@ async def test_status_settled_clears_session(trade_flow, mock_session_service, m
     )
     session = {
         "onboarded": True,
+        "transaction_password_set": True,
         "engine_user_id": "usr_test123",
         "flow": "trade",
         "step": STEP_AWAITING_DEPOSIT,
@@ -272,8 +306,53 @@ async def test_status_settled_clears_session(trade_flow, mock_session_service, m
     assert "trade_data" not in updated or updated.get("trade_data") is None
 
 
+@pytest.mark.asyncio
+async def test_status_recovers_latest_active_trade_from_engine(trade_flow, mock_session_service, mock_engine_client):
+    mock_engine_client.get_latest_active_trade = AsyncMock(
+        return_value={
+            "trade_id": "trd_dispute999",
+            "trade_ref": "TRD-DISPUTE999",
+            "status": "needs_attention",
+            "raw_status": "DISPUTE",
+            "asset": "BTC",
+            "net_amount_kobo": 20863484868,
+            "deposit_address": "sandbox://deposit/btc/trd_dispute999",
+            "bank_name": "Oval Banc",
+            "masked_account_number": "******1001",
+            "dispute_reason": "binance: insufficient BTC balance: have 0.75000000, need 2",
+        }
+    )
+    mock_engine_client.get_trade_status = AsyncMock(
+        return_value={
+            "trade_id": "trd_dispute999",
+            "status": "needs_attention",
+            "raw_status": "DISPUTE",
+            "confirmations": 2,
+            "required_confirmations": 2,
+            "bank_name": "Oval Banc",
+            "masked_account_number": "******1001",
+            "dispute_reason": "binance: insufficient BTC balance: have 0.75000000, need 2",
+        }
+    )
+
+    session = {
+        "onboarded": True,
+        "transaction_password_set": True,
+        "engine_user_id": "usr_test123",
+        "flow": None,
+        "step": None,
+    }
+
+    result = await trade_flow.handle_status("+2348012345678", session)
+
+    assert "requires manual review" in result.lower()
+    assert "blocking account deletion" in result.lower()
+    updated = await mock_session_service.get("+2348012345678")
+    assert updated["trade_data"]["trade_id"] == "trd_dispute999"
+
+
 def test_kobo_to_naira_conversion():
-    assert TradeFlow._kobo_to_naira_str(100) == "N1.00"
-    assert TradeFlow._kobo_to_naira_str(163762348750) == "N1,637,623,487.50"
-    assert TradeFlow._kobo_to_naira_str(50) == "N0.50"
-    assert TradeFlow._kobo_to_naira_str(0) == "N0.00"
+    assert TradeFlow._kobo_to_naira_str(100) == "₦1.00"
+    assert TradeFlow._kobo_to_naira_str(163762348750) == "₦1,637,623,487.50"
+    assert TradeFlow._kobo_to_naira_str(50) == "₦0.50"
+    assert TradeFlow._kobo_to_naira_str(0) == "₦0.00"

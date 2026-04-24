@@ -8,12 +8,10 @@ import (
 	"time"
 
 	"convert-chain/go-engine/internal/api/dto"
-	"convert-chain/go-engine/internal/api/handlers"
 	"convert-chain/go-engine/internal/domain"
 	graphclient "convert-chain/go-engine/internal/graph"
 	"convert-chain/go-engine/internal/statemachine"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -26,6 +24,12 @@ func (s *ApplicationService) CreateOrGetUser(ctx context.Context, req dto.Create
 
 	user, err := s.getUserByChannel(ctx, channelType, req.ChannelUserID)
 	if err == nil {
+		if user.DeletionSubjectHash == nil || strings.TrimSpace(*user.DeletionSubjectHash) == "" {
+			hash := deletionSubjectHash(channelType, req.ChannelUserID)
+			if _, updateErr := s.db.Exec(ctx, `UPDATE users SET deletion_subject_hash = $2 WHERE id = $1::uuid`, user.ID, hash); updateErr == nil {
+				user.DeletionSubjectHash = &hash
+			}
+		}
 		return user, false, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
@@ -38,10 +42,11 @@ func (s *ApplicationService) CreateOrGetUser(ctx context.Context, req dto.Create
             INSERT INTO users (
                 channel_type,
                 channel_user_id,
+                deletion_subject_hash,
                 phone_number,
                 first_name,
                 status
-            ) VALUES ($1::channel_type, $2, NULLIF($3, ''), NULLIF($4, ''), 'UNREGISTERED')
+            ) VALUES ($1::channel_type, $2, $3, NULLIF($4, ''), NULLIF($5, ''), 'UNREGISTERED')
             RETURNING
                 id,
                 channel_type::text,
@@ -54,6 +59,13 @@ func (s *ApplicationService) CreateOrGetUser(ctx context.Context, req dto.Create
                 status::text,
                 kyc_tier::text,
                 graph_person_id,
+                txn_password_hash,
+                txn_password_set_at,
+                txn_password_failed_attempts,
+                txn_password_locked_until,
+                deleted_at,
+                anonymized_at,
+                deletion_subject_hash,
                 consent_given_at,
                 host(consent_ip)::text,
                 is_active,
@@ -62,6 +74,7 @@ func (s *ApplicationService) CreateOrGetUser(ctx context.Context, req dto.Create
         `,
 			channelType,
 			req.ChannelUserID,
+			deletionSubjectHash(channelType, req.ChannelUserID),
 			req.PhoneNumber,
 			req.Username,
 		),
@@ -139,12 +152,19 @@ func (s *ApplicationService) ListBanks(ctx context.Context) ([]*domain.BankDirec
 		})
 	}
 
-	return mergeBankDirectories(staticBanks, providerBanks), nil
+	merged := mergeBankDirectories(staticBanks, providerBanks)
+	if s.graph.IsSandbox() {
+		return withSandboxTestBank(merged), nil
+	}
+	return merged, nil
 }
 
 func (s *ApplicationService) ResolveBankAccount(ctx context.Context, bankCode, accountNumber string) (*domain.BankAccountResolution, error) {
 	if s.graph == nil {
 		return nil, errors.New("graph payout service is not configured")
+	}
+	if s.graph.IsSandbox() {
+		return resolveSandboxBankAccount(bankCode, accountNumber)
 	}
 
 	resolved, err := s.graph.ResolveBankAccount(ctx, bankCode, accountNumber)
@@ -174,34 +194,51 @@ func (s *ApplicationService) AddBankAccount(ctx context.Context, req dto.AddBank
 		return nil, errors.New("graph payout service is not configured")
 	}
 
-	resolved, err := s.ResolveBankAccount(ctx, req.BankCode, req.AccountNumber)
-	if err != nil {
-		return nil, fmt.Errorf("resolve bank account: %w", err)
-	}
+	var resolved *domain.BankAccountResolution
+	var payoutDestination *graphclient.PayoutDestination
+	var graphDestID string
 
-	walletAccount, err := s.graph.GetWalletAccountByCurrency(ctx, "NGN")
-	if err != nil {
-		return nil, fmt.Errorf("load NGN wallet account: %w", err)
-	}
+	if s.graph.IsSandbox() {
+		s.logger.Info("sandbox mode: resolving bank account locally without provider verification",
+			"user_id", req.UserID, "bank_code", req.BankCode, "account_number", req.AccountNumber)
+		var err error
+		resolved, err = resolveSandboxBankAccount(req.BankCode, req.AccountNumber)
+		if err != nil {
+			return nil, fmt.Errorf("resolve sandbox bank account: %w", err)
+		}
+		graphDestID = makeSandboxDestinationID(resolved.BankCode, resolved.AccountNumber)
+	} else {
+		var err error
+		resolved, err = s.ResolveBankAccount(ctx, req.BankCode, req.AccountNumber)
+		if err != nil {
+			return nil, fmt.Errorf("resolve bank account: %w", err)
+		}
 
-	destinationLabel := fmt.Sprintf("convertchain-%s-%s", req.UserID[:8], resolved.AccountNumber)
-	payoutDestination, err := s.graph.CreatePayoutDestination(ctx, graphclient.CreatePayoutDestinationRequest{
-		AccountID:       walletAccount.ID,
-		SourceType:      "wallet_account",
-		Label:           destinationLabel,
-		Type:            "nip",
-		AccountType:     "personal",
-		BankCode:        resolved.BankCode,
-		BankID:          resolved.BankID,
-		AccountNumber:   resolved.AccountNumber,
-		BeneficiaryName: resolved.AccountName,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("create payout destination: %w", err)
+		walletAccount, err := s.graph.GetWalletAccountByCurrency(ctx, "NGN")
+		if err != nil {
+			return nil, fmt.Errorf("load NGN wallet account: %w", err)
+		}
+
+		destinationLabel := fmt.Sprintf("convertchain-%s-%s", req.UserID[:8], resolved.AccountNumber)
+		payoutDestination, err = s.graph.CreatePayoutDestination(ctx, graphclient.CreatePayoutDestinationRequest{
+			AccountID:       walletAccount.ID,
+			SourceType:      "wallet_account",
+			Label:           destinationLabel,
+			Type:            "nip",
+			AccountType:     "personal",
+			BankCode:        resolved.BankCode,
+			BankID:          resolved.BankID,
+			AccountNumber:   resolved.AccountNumber,
+			BeneficiaryName: resolved.AccountName,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("create payout destination: %w", err)
+		}
+		graphDestID = strings.TrimSpace(payoutDestination.ID)
 	}
 
 	bankName := resolved.BankName
-	if payoutDestination.BankName != "" {
+	if payoutDestination != nil && payoutDestination.BankName != "" {
 		bankName = payoutDestination.BankName
 	}
 	if bankName == "" {
@@ -209,7 +246,7 @@ func (s *ApplicationService) AddBankAccount(ctx context.Context, req dto.AddBank
 	}
 
 	accountName := resolved.AccountName
-	if payoutDestination.AccountName != "" {
+	if payoutDestination != nil && payoutDestination.AccountName != "" {
 		accountName = payoutDestination.AccountName
 	}
 	if accountName == "" {
@@ -256,7 +293,7 @@ func (s *ApplicationService) AddBankAccount(ctx context.Context, req dto.AddBank
 			resolved.AccountNumber,
 			accountName,
 			bankName,
-			payoutDestination.ID,
+			graphDestID,
 			isPrimary,
 		),
 		account,
@@ -302,7 +339,7 @@ func (s *ApplicationService) ListBankAccounts(ctx context.Context, userID string
 	return accounts, rows.Err()
 }
 
-func (s *ApplicationService) RaiseDispute(ctx context.Context, req dto.DisputeRequest) (*handlers.DisputeRecord, error) {
+func (s *ApplicationService) RaiseDispute(ctx context.Context, req dto.DisputeRequest) (*domain.DisputeRecord, error) {
 	trade, err := s.getTradeByID(ctx, req.TradeID)
 	if err != nil {
 		return nil, err
@@ -322,30 +359,30 @@ func (s *ApplicationService) RaiseDispute(ctx context.Context, req dto.DisputeRe
 	}
 	defer tx.Rollback(ctx)
 
-	_, err = tx.Exec(ctx, `
-        UPDATE trades
-        SET status = 'DISPUTE'::trade_status,
-            dispute_reason = $2
-        WHERE id = $1::uuid
-    `, req.TradeID, note)
-	if err != nil {
+	if err := s.updateTradeStatusTx(ctx, tx, trade, string(statemachine.TradeDispute), map[string]interface{}{
+		"reason":         note,
+		"dispute_source": disputeSourceUser,
+	}, "user"); err != nil {
 		return nil, err
 	}
 
-	if err := insertTradeHistory(ctx, tx, trade.ID, &trade.Status, "DISPUTE", "user", note); err != nil {
+	dispute, err := getOpenTradeDisputeTx(ctx, tx, trade.ID)
+	if err != nil {
 		return nil, err
+	}
+	if dispute == nil {
+		return nil, fmt.Errorf("failed to create dispute record")
 	}
 
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 
-	disputeID := uuid.NewString()
-	return &handlers.DisputeRecord{
-		ID:        disputeID,
+	return &domain.DisputeRecord{
+		ID:        dispute.ID.String(),
 		TradeID:   req.TradeID,
-		CreatedAt: time.Now().UTC(),
-		TicketRef: "DSP-" + strings.ToUpper(strings.ReplaceAll(disputeID, "-", "")[:8]),
+		CreatedAt: dispute.CreatedAt,
+		TicketRef: dispute.TicketRef,
 	}, nil
 }
 

@@ -1,0 +1,16 @@
+[GIN-debug] [WARNING] Running in "debug" mode. Switch to "release" mode in production.
+ - using env:	export GIN_MODE=release
+ - using code:	gin.SetMode(gin.ReleaseMode)
+
+[GIN-debug] GET    /health                   --> convert-chain/go-engine/internal/api/handlers.(*HealthHandler).Health-fm (3 handlers)
+[GIN-debug] GET    /ready                    --> convert-chain/go-engine/internal/api/handlers.(*HealthHandler).Ready-fm (3 handlers)
+[GIN-debug] POST   /api/v1/users             --> convert-chain/go-engine/internal/api/handlers.(*UserHandler).CreateOrGetUser-fm (4 handlers)
+[GIN-debug] POST   /api/v1/consent           --> convert-chain/go-engine/internal/api/handlers.(*UserHandler).RecordConsent-fm (4 handlers)
+[GIN-debug] POST   /api/v1/kyc/submit        --> convert-chain/go-engine/internal/api/handlers.(*KYCHandler).SubmitKYC-fm (4 handlers)
+[GIN-debug] GET    /api/v1/kyc/status/:user_id --> convert-chain/go-engine/internal/api/handlers.(*KYCHandler).GetKYCStatus-fm (4 handlers)
+[GIN-debug] POST   /api/v1/quotes            --> convert-chain/go-engine/internal/api/handlers.(*QuoteHandler).CreateQuote-fm (5 handlers)
+[GIN-debug] POST   /api/v1/trades            --> convert-chain/go-engine/internal/api/handlers.(*TradeHandler).CreateTrade-fm (5 handlers)
+[GIN-debug] GET    /api/v1/trades/:trade_id  --> convert-chain/go-engine/internal/api/handlers.(*TradeHandler).GetTrade-fm (4 handlers)
+[GIN-debug] POST   /api/v1/bank-accounts     --> convert-chain/go-engine/internal/api/handlers.(*BankHandler).AddBankAccount-fm (4 handlers)
+[GIN-debug] GET    /api/v1/bank-accounts/:user_id --> convert-chain/go-engine/internal/api/handlers.(*BankHandler).ListBankAccounts-fm (4 handlers)
+[GIN-debug] POST   /api/v1/disputes          --> convert-chain/go-engine/internal/api/handlers.(*DisputeHandler).RaiseDispute-fm (4 handlers)

@@ -1,21 +1,3 @@
-// internal/exchange/binance/client.go
-//
-// Binance Spot API v3 client for ConvertChain.
-//
-// This client handles two types of API calls:
-//
-// 1. PUBLIC endpoints (no API key needed):
-//    - GET /api/v3/ticker/price — current price for a trading pair
-//    These are free and can be called without authentication.
-//    You CAN test price queries right now without any Binance account.
-//
-// 2. PRIVATE endpoints (API key + signature required):
-//    - POST /api/v3/order — place a trade order
-//    - GET /api/v3/account — check account balances
-//    These require a Binance account with API keys and HMAC-SHA256 signing.
-//    You'll set these up when you're ready for live trading.
-//
-// API Documentation: https://binance-docs.github.io/apidocs/spot/en/
 package binance
 
 import (
@@ -30,58 +12,36 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"sync"
 	"time"
 
 	"convert-chain/go-engine/internal/exchange"
 )
 
-// ──────────────────────────────────────────────
-// CONFIGURATION
-// ──────────────────────────────────────────────
-
 const (
-	// BaseURL is the Binance Spot API base URL.
-	// For the testnet (paper trading), use: "https://testnet.binance.vision"
-	BaseURL = "https://api.binance.com"
-
-	// TestnetURL is for testing without real money.
-	// Binance provides a testnet that mimics the real API but uses fake funds.
-	TestnetURL = "https://testnet.binance.vision"
+	BaseURL                     = "https://api.binance.com"
+	TestnetURL                  = "https://testnet.binance.vision"
+	signedRequestRecvWindowMS   = int64(5000)
+	serverTimeOffsetCacheWindow = 30 * time.Second
 )
 
-// ──────────────────────────────────────────────
-// CLIENT
-// ──────────────────────────────────────────────
-
-// Client is the Binance Spot API v3 client.
 type Client struct {
-	// apiKey identifies your Binance account.
-	// Sent as the "X-MBX-APIKEY" header on every private request.
-	// Can be empty for public-only endpoints (price queries).
-	apiKey string
-
-	// secretKey is used to generate HMAC-SHA256 signatures.
-	// NEVER log this. NEVER commit this. Store in Vault in production.
-	secretKey string
-
-	// baseURL can be BaseURL (production) or TestnetURL (testing)
-	baseURL string
-
-	// httpClient is reused across all requests (connection pooling).
+	apiKey     string
+	secretKey  string
+	baseURL    string
 	httpClient *http.Client
+
+	mu                  sync.Mutex
+	timeOffset          time.Duration
+	timeOffsetExpiresAt time.Time
 }
 
-// NewClient creates a new Binance API client.
-//
-// Parameters:
-//   - apiKey: your Binance API key (empty string for public-only access)
-//   - secretKey: your Binance API secret (empty string for public-only access)
-//   - useTestnet: if true, uses the Binance testnet (fake money for testing)
 func NewClient(apiKey, secretKey string, useTestnet bool) *Client {
 	base := BaseURL
 	if useTestnet {
 		base = TestnetURL
 	}
+
 	return &Client{
 		apiKey:    apiKey,
 		secretKey: secretKey,
@@ -92,25 +52,9 @@ func NewClient(apiKey, secretKey string, useTestnet bool) *Client {
 	}
 }
 
-// Name returns the exchange name (implements ExchangeClient interface).
 func (c *Client) Name() string {
 	return "binance"
 }
-
-// ──────────────────────────────────────────────
-// HMAC-SHA256 SIGNING
-//
-// Private Binance endpoints require that you "sign" your request.
-// The process:
-//   1. Take all your request parameters as a query string
-//      Example: "symbol=BTCUSDT&side=SELL&type=MARKET&quantity=0.25&timestamp=1234567890"
-//   2. Create an HMAC-SHA256 hash using your secret key
-//   3. Append the hash as &signature=... to the query string
-//
-// This proves to Binance that you (the API key holder) authorized
-// this exact request. An attacker who intercepts the request cannot
-// modify the parameters without invalidating the signature.
-// ──────────────────────────────────────────────
 
 func (c *Client) sign(queryString string) string {
 	mac := hmac.New(sha256.New, []byte(c.secretKey))
@@ -118,42 +62,25 @@ func (c *Client) sign(queryString string) string {
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
-// ──────────────────────────────────────────────
-// PUBLIC ENDPOINTS (No API key needed)
-// ──────────────────────────────────────────────
-
-// GetSpotPrice retrieves the current best price for a trading pair.
-// This is a PUBLIC endpoint — works without API keys.
-//
-// Example: GetSpotPrice(ctx, "BTCUSDT") returns the current BTC/USDT price.
-//
-// Binance API endpoint: GET /api/v3/ticker/price
-// Documentation: https://binance-docs.github.io/apidocs/spot/en/#symbol-price-ticker
 func (c *Client) GetSpotPrice(ctx context.Context, symbol string) (*big.Float, error) {
-	// Build the URL
 	reqURL := fmt.Sprintf("%s/api/v3/ticker/price?symbol=%s", c.baseURL, symbol)
 
-	// Create request with context (for cancellation/timeout)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 
-	// Send the request
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("binance HTTP error: %w", err)
 	}
 	defer resp.Body.Close()
 
-	// Check for HTTP errors
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("binance API error (HTTP %d): %s", resp.StatusCode, string(body))
 	}
 
-	// Parse the JSON response
-	// Binance returns: {"symbol":"BTCUSDT","price":"67123.45000000"}
 	var result struct {
 		Symbol string `json:"symbol"`
 		Price  string `json:"price"`
@@ -162,9 +89,6 @@ func (c *Client) GetSpotPrice(ctx context.Context, symbol string) (*big.Float, e
 		return nil, fmt.Errorf("decode binance response: %w", err)
 	}
 
-	// Convert the price string to big.Float
-	// This is critical — we parse the string directly into big.Float,
-	// never going through float64 (which would lose precision).
 	price, ok := new(big.Float).SetString(result.Price)
 	if !ok {
 		return nil, fmt.Errorf("invalid price format from binance: %q", result.Price)
@@ -173,141 +97,242 @@ func (c *Client) GetSpotPrice(ctx context.Context, symbol string) (*big.Float, e
 	return price, nil
 }
 
-// ──────────────────────────────────────────────
-// PRIVATE ENDPOINTS (API key + signature required)
-// ──────────────────────────────────────────────
-
-// PlaceMarketOrder places a market sell order.
-//
-// A market order means "sell immediately at the best available price."
-// Unlike a limit order (sell only if price reaches X), a market order
-// executes instantly but the exact price depends on the order book.
-//
-// For our platform, we always use market orders because:
-// 1. Speed matters — the user is waiting for their NGN
-// 2. The quote already locked in a price (with a small buffer)
-// 3. Slippage on major pairs (BTCUSDT) is negligible for our volumes
-//
-// Binance API endpoint: POST /api/v3/order
-// Documentation: https://binance-docs.github.io/apidocs/spot/en/#new-order-trade
 func (c *Client) PlaceMarketOrder(ctx context.Context, symbol, side, quantity string) (*exchange.OrderResult, error) {
-	// Check that API keys are configured
 	if c.apiKey == "" || c.secretKey == "" {
-		return nil, fmt.Errorf("binance API keys not configured — set BINANCE_API_KEY and BINANCE_SECRET_KEY in .env")
+		return nil, fmt.Errorf("binance API keys not configured - set BINANCE_API_KEY and BINANCE_SECRET_KEY in .env")
 	}
 
-	// Build the signed request parameters
-	timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
 	params := url.Values{}
-	params.Set("symbol", symbol)       // e.g., "BTCUSDT"
-	params.Set("side", side)           // "SELL"
-	params.Set("type", "MARKET")       // Market order (execute immediately)
-	params.Set("quantity", quantity)    // e.g., "0.25000000"
-	params.Set("timestamp", timestamp) // Current time in milliseconds
+	params.Set("symbol", symbol)
+	params.Set("side", side)
+	params.Set("type", "MARKET")
+	params.Set("quantity", quantity)
 
-	// Sign the parameters
-	queryString := params.Encode()
-	signature := c.sign(queryString)
-	params.Set("signature", signature)
-
-	// Create the POST request
-	reqURL := c.baseURL + "/api/v3/order?" + params.Encode()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, nil)
+	body, err := c.doSignedRequest(ctx, http.MethodPost, "/api/v3/order", params, true)
 	if err != nil {
-		return nil, fmt.Errorf("create order request: %w", err)
+		return nil, err
 	}
 
-	// Add the API key header (required for all private endpoints)
-	req.Header.Set("X-MBX-APIKEY", c.apiKey)
-
-	// Send the request
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("binance order HTTP error: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// Parse the response
-	var binanceResult struct {
+	var result struct {
 		Symbol             string `json:"symbol"`
 		OrderID            int64  `json:"orderId"`
-		ClientOrderID      string `json:"clientOrderId"`
-		TransactTime       int64  `json:"transactTime"`
 		Price              string `json:"price"`
-		OrigQty            string `json:"origQty"`
 		ExecutedQty        string `json:"executedQty"`
-		CumulativeQuoteQty string `json:"cummulativeQuoteQty"` // Note: Binance typo is intentional
+		CumulativeQuoteQty string `json:"cummulativeQuoteQty"`
 		Status             string `json:"status"`
-		Code               int    `json:"code,omitempty"` // Non-zero means error
+		Code               int    `json:"code,omitempty"`
 		Msg                string `json:"msg,omitempty"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&binanceResult); err != nil {
+	if err := json.Unmarshal(body, &result); err != nil {
 		return nil, fmt.Errorf("decode order response: %w", err)
 	}
-
-	// Check for Binance-level errors
-	// Binance returns negative error codes: -1013, -2010, etc.
-	if binanceResult.Code != 0 {
-		return nil, fmt.Errorf("binance error %d: %s", binanceResult.Code, binanceResult.Msg)
+	if result.Code != 0 {
+		return nil, fmt.Errorf("binance error %d: %s", result.Code, result.Msg)
 	}
 
-	// Convert to our standardized OrderResult
 	return &exchange.OrderResult{
-		OrderID:     strconv.FormatInt(binanceResult.OrderID, 10),
-		Symbol:      binanceResult.Symbol,
+		OrderID:     strconv.FormatInt(result.OrderID, 10),
+		Symbol:      result.Symbol,
 		Side:        side,
-		Status:      binanceResult.Status,
-		ExecutedQty: binanceResult.ExecutedQty,
-		Price:       binanceResult.Price,
-		QuoteQty:    binanceResult.CumulativeQuoteQty,
+		Status:      result.Status,
+		ExecutedQty: result.ExecutedQty,
+		Price:       result.Price,
+		QuoteQty:    result.CumulativeQuoteQty,
 	}, nil
 }
 
-// GetBalance fetches the available balance for a specific asset.
-//
-// Binance API endpoint: GET /api/v3/account
-// This is a private endpoint that returns all balances.
-// We filter for the specific asset the caller wants.
 func (c *Client) GetBalance(ctx context.Context, asset string) (string, error) {
 	if c.apiKey == "" || c.secretKey == "" {
 		return "0", fmt.Errorf("binance API keys not configured")
 	}
 
-	timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
-	params := url.Values{}
-	params.Set("timestamp", timestamp)
-	queryString := params.Encode()
-	params.Set("signature", c.sign(queryString))
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		c.baseURL+"/api/v3/account?"+params.Encode(), nil)
+	body, err := c.doSignedRequest(ctx, http.MethodGet, "/api/v3/account", url.Values{}, true)
 	if err != nil {
 		return "0", err
 	}
-	req.Header.Set("X-MBX-APIKEY", c.apiKey)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return "0", fmt.Errorf("binance account HTTP error: %w", err)
-	}
-	defer resp.Body.Close()
 
 	var account struct {
+		Code     int    `json:"code,omitempty"`
+		Msg      string `json:"msg,omitempty"`
 		Balances []struct {
 			Asset string `json:"asset"`
 			Free  string `json:"free"`
 		} `json:"balances"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&account); err != nil {
+	if err := json.Unmarshal(body, &account); err != nil {
 		return "0", fmt.Errorf("decode account response: %w", err)
 	}
+	if account.Code != 0 {
+		return "0", fmt.Errorf("binance error %d: %s", account.Code, account.Msg)
+	}
 
-	// Find the requested asset in the balance list
-	for _, b := range account.Balances {
-		if b.Asset == asset {
-			return b.Free, nil
+	for _, balance := range account.Balances {
+		if balance.Asset == asset {
+			return balance.Free, nil
 		}
 	}
 
-	return "0", nil // Asset not found — balance is zero
+	return "0", nil
+}
+
+type apiErrorResponse struct {
+	Code int    `json:"code"`
+	Msg  string `json:"msg"`
+}
+
+func (c *Client) doSignedRequest(
+	ctx context.Context,
+	method string,
+	path string,
+	params url.Values,
+	retryOnTimeDrift bool,
+) ([]byte, error) {
+	queryString, err := c.buildSignedQueryString(ctx, params, false)
+	if err != nil {
+		return nil, err
+	}
+
+	body, apiErr, statusCode, err := c.doRequest(ctx, method, path, queryString, true)
+	if err != nil {
+		return nil, fmt.Errorf("binance %s HTTP error: %w", path, err)
+	}
+
+	if apiErr != nil && apiErr.Code == -1021 && retryOnTimeDrift {
+		queryString, err = c.buildSignedQueryString(ctx, params, true)
+		if err != nil {
+			return nil, err
+		}
+
+		body, apiErr, statusCode, err = c.doRequest(ctx, method, path, queryString, true)
+		if err != nil {
+			return nil, fmt.Errorf("binance %s HTTP error: %w", path, err)
+		}
+	}
+
+	if apiErr != nil {
+		return nil, fmt.Errorf("binance error %d: %s", apiErr.Code, apiErr.Msg)
+	}
+	if statusCode >= http.StatusBadRequest {
+		return nil, fmt.Errorf("binance API error (HTTP %d): %s", statusCode, string(body))
+	}
+
+	return body, nil
+}
+
+func (c *Client) buildSignedQueryString(ctx context.Context, params url.Values, forceTimeSync bool) (string, error) {
+	signedParams := cloneValues(params)
+
+	timestamp, err := c.serverTimestampMillis(ctx, forceTimeSync)
+	if err != nil {
+		return "", fmt.Errorf("sync binance server time: %w", err)
+	}
+
+	signedParams.Set("timestamp", strconv.FormatInt(timestamp, 10))
+	signedParams.Set("recvWindow", strconv.FormatInt(signedRequestRecvWindowMS, 10))
+
+	queryString := signedParams.Encode()
+	signedParams.Set("signature", c.sign(queryString))
+	return signedParams.Encode(), nil
+}
+
+func (c *Client) serverTimestampMillis(ctx context.Context, force bool) (int64, error) {
+	offset, err := c.refreshTimeOffset(ctx, force)
+	if err != nil {
+		return 0, err
+	}
+	return time.Now().Add(offset).UnixMilli(), nil
+}
+
+func (c *Client) refreshTimeOffset(ctx context.Context, force bool) (time.Duration, error) {
+	c.mu.Lock()
+	if !force && time.Now().Before(c.timeOffsetExpiresAt) {
+		offset := c.timeOffset
+		c.mu.Unlock()
+		return offset, nil
+	}
+	c.mu.Unlock()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/v3/time", nil)
+	if err != nil {
+		return 0, err
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("binance server time HTTP %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		ServerTime int64 `json:"serverTime"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return 0, err
+	}
+
+	offset := time.UnixMilli(result.ServerTime).Sub(time.Now())
+
+	c.mu.Lock()
+	c.timeOffset = offset
+	c.timeOffsetExpiresAt = time.Now().Add(serverTimeOffsetCacheWindow)
+	c.mu.Unlock()
+
+	return offset, nil
+}
+
+func (c *Client) doRequest(
+	ctx context.Context,
+	method string,
+	path string,
+	queryString string,
+	signed bool,
+) ([]byte, *apiErrorResponse, int, error) {
+	reqURL := c.baseURL + path
+	if queryString != "" {
+		reqURL += "?" + queryString
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, reqURL, nil)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	if signed {
+		req.Header.Set("X-MBX-APIKEY", c.apiKey)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, nil, resp.StatusCode, err
+	}
+
+	var apiErr apiErrorResponse
+	if err := json.Unmarshal(body, &apiErr); err == nil && apiErr.Code != 0 {
+		return body, &apiErr, resp.StatusCode, nil
+	}
+
+	return body, nil, resp.StatusCode, nil
+}
+
+func cloneValues(values url.Values) url.Values {
+	cloned := url.Values{}
+	for key, items := range values {
+		for _, item := range items {
+			cloned.Add(key, item)
+		}
+	}
+	return cloned
 }

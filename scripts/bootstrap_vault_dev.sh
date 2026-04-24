@@ -29,6 +29,7 @@ set +a
 VAULT_TOKEN="${VAULT_TOKEN:-devroot}"
 VAULT_ADDR="${VAULT_ADDR:-http://127.0.0.1:8200}"
 SERVICE_TOKEN="${SERVICE_TOKEN:-convertchain-dev-service-token-change-me}"
+ADMIN_API_TOKEN="${ADMIN_API_TOKEN:-convertchain-dev-admin-token-change-me}"
 PII_KEY_HEX="${PII_KEY_HEX:-}"
 
 if [[ -z "$PII_KEY_HEX" ]]; then
@@ -54,13 +55,16 @@ run_vault kv put secret/convertchain/bybit \
   api_key="${BYBIT_API_KEY:-}" api_secret="${BYBIT_SECRET_KEY:-}"
 
 run_vault kv put secret/convertchain/graph \
-  api_key="${GRAPH_API_KEY:-}"
+  api_key="${GRAPH_API_KEY:-}" \
+  webhook_secret="${GRAPH_WEBHOOK_SECRET:-}" \
+  webhook_public_base_url="${GRAPH_WEBHOOK_PUBLIC_BASE_URL:-}"
 
 run_vault kv put secret/convertchain/smileid \
   partner_id="${SMILE_ID_PARTNER_ID:-}" api_key="${SMILE_ID_API_KEY:-}"
 
 run_vault kv put secret/convertchain/pii_key key="$PII_KEY_HEX"
 run_vault kv put secret/convertchain/service_token token="$SERVICE_TOKEN"
+run_vault kv put secret/convertchain/admin_token token="$ADMIN_API_TOKEN"
 
 if [[ -n "${SUMSUB_APP_TOKEN:-}" || -n "${SUMSUB_SECRET_KEY:-}" ]]; then
   run_vault kv put secret/convertchain/sumsub \
@@ -74,7 +78,8 @@ for path in \
   convertchain/graph \
   convertchain/smileid \
   convertchain/pii_key \
-  convertchain/service_token
+  convertchain/service_token \
+  convertchain/admin_token
   do
   run_vault kv get "secret/$path" >/dev/null
   echo "  - ok: secret/$path"

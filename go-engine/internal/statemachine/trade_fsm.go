@@ -49,8 +49,9 @@ const (
 	TradePayoutFailed    TradeState = "PAYOUT_FAILED"    // Bank payout failed
 
 	// Phase 5: Exceptions
-	TradeDispute  TradeState = "DISPUTE"   // Manual intervention needed
-	TradeCancelled TradeState = "CANCELLED" // Trade cancelled
+	TradeDispute       TradeState = "DISPUTE"        // Manual intervention needed
+	TradeDisputeClosed TradeState = "DISPUTE_CLOSED" // Closed without payout after review
+	TradeCancelled     TradeState = "CANCELLED"      // Trade cancelled
 )
 
 // ──────────────────────────────────────────────

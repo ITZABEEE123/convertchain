@@ -32,6 +32,13 @@ func (s *ApplicationService) getUserByChannel(ctx context.Context, channelType, 
 				status::text,
 				kyc_tier::text,
 				graph_person_id,
+				txn_password_hash,
+				txn_password_set_at,
+				txn_password_failed_attempts,
+				txn_password_locked_until,
+				deleted_at,
+				anonymized_at,
+				deletion_subject_hash,
 				consent_given_at,
 				host(consent_ip)::text,
 				is_active,
@@ -65,6 +72,13 @@ func (s *ApplicationService) getUserByID(ctx context.Context, userID string) (*d
 				status::text,
 				kyc_tier::text,
 				graph_person_id,
+				txn_password_hash,
+				txn_password_set_at,
+				txn_password_failed_attempts,
+				txn_password_locked_until,
+				deleted_at,
+				anonymized_at,
+				deletion_subject_hash,
 				consent_given_at,
 				host(consent_ip)::text,
 				is_active,
@@ -168,6 +182,8 @@ func (s *ApplicationService) getTradeByID(ctx context.Context, tradeID string) (
 				exchange_order_id,
 				graph_conversion_id,
 				graph_payout_id,
+				payout_authorized_at,
+				payout_authorization_method,
 				dispute_reason,
 				expires_at,
 				completed_at,
@@ -187,6 +203,51 @@ func (s *ApplicationService) getTradeByID(ctx context.Context, tradeID string) (
 	return trade, nil
 }
 
+func (s *ApplicationService) getTradeByGraphPayoutID(ctx context.Context, payoutID string) (*domain.Trade, error) {
+	trade := &domain.Trade{}
+	err := scanTrade(
+		s.db.QueryRow(ctx, `
+			SELECT
+				id,
+				trade_ref,
+				user_id,
+				quote_id,
+				bank_account_id,
+				status::text,
+				from_currency::text,
+				to_currency::text,
+				from_amount,
+				to_amount_expected,
+				to_amount_actual,
+				fee_amount,
+				deposit_address,
+				deposit_txhash,
+				deposit_confirmed_at,
+				exchange_order_id,
+				graph_conversion_id,
+				graph_payout_id,
+				payout_authorized_at,
+				payout_authorization_method,
+				dispute_reason,
+				expires_at,
+				completed_at,
+				created_at,
+				updated_at
+			FROM trades
+			WHERE graph_payout_id = $1
+			ORDER BY updated_at DESC
+			LIMIT 1
+		`, payoutID),
+		trade,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return trade, nil
+}
 func (s *ApplicationService) getBankAccountByID(ctx context.Context, bankAccountID string) (*domain.BankAccount, error) {
 	account := &domain.BankAccount{}
 	err := scanBankAccount(
@@ -205,6 +266,33 @@ func (s *ApplicationService) getBankAccountByID(ctx context.Context, bankAccount
 				created_at
 			FROM bank_accounts
 			WHERE id = $1::uuid AND is_active = TRUE
+		`, bankAccountID),
+		account,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return account, nil
+}
+
+func (s *ApplicationService) getBankAccountByIDOrArchived(ctx context.Context, bankAccountID string) (*domain.BankAccount, error) {
+	account := &domain.BankAccount{}
+	err := scanBankAccount(
+		s.db.QueryRow(ctx, `
+			SELECT
+				id,
+				user_id,
+				bank_code,
+				account_number,
+				account_name,
+				bank_name,
+				graph_dest_id,
+				is_primary,
+				is_verified,
+				is_active,
+				created_at
+			FROM bank_accounts
+			WHERE id = $1::uuid
 		`, bankAccountID),
 		account,
 	)
@@ -235,6 +323,13 @@ func scanUser(src rowScanner, user *domain.User) error {
 		&user.Status,
 		&user.KYCTier,
 		&user.GraphPersonID,
+		&user.TxnPasswordHash,
+		&user.TxnPasswordSetAt,
+		&user.TxnPasswordFailedAttempts,
+		&user.TxnPasswordLockedUntil,
+		&user.DeletedAt,
+		&user.AnonymizedAt,
+		&user.DeletionSubjectHash,
 		&user.ConsentGivenAt,
 		&user.ConsentIP,
 		&user.IsActive,
@@ -300,6 +395,8 @@ func scanTrade(src rowScanner, trade *domain.Trade) error {
 		&trade.ExchangeOrderID,
 		&trade.GraphConversionID,
 		&trade.GraphPayoutID,
+		&trade.PayoutAuthorizedAt,
+		&trade.PayoutAuthorizationMethod,
 		&trade.DisputeReason,
 		&trade.ExpiresAt,
 		&trade.CompletedAt,

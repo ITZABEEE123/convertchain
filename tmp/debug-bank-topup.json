@@ -1,0 +1,9 @@
+{
+    "account_id":  "7afcd10c2d1411f19c3c0e74f6457b17",
+    "currency":  "NGN",
+    "reference":  "debug-bank-topup-20260418065415",
+    "sender_name":  "ConvertChain Sandbox",
+    "amount":  500000,
+    "source_type":  "bank_account",
+    "description":  "ConvertChain bank funding test"
+}

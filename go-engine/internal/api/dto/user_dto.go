@@ -9,9 +9,10 @@ type CreateUserRequest struct {
 }
 
 type CreateUserResponse struct {
-	UserID    string `json:"user_id"`
-	Status    string `json:"status"`     // "CREATED" or "EXISTING"
-	KYCStatus string `json:"kyc_status"` // "not_started", "pending", "approved", "rejected"
+	UserID                 string `json:"user_id"`
+	Status                 string `json:"status"`     // "CREATED" or "EXISTING"
+	KYCStatus              string `json:"kyc_status"` // "not_started", "pending", "approved", "rejected"
+	TransactionPasswordSet bool   `json:"transaction_password_set"`
 }
 
 type ConsentRequest struct {

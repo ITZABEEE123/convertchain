@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from contextlib import asynccontextmanager
 from typing import Any
@@ -37,6 +38,7 @@ structlog.configure(
 
 log = structlog.get_logger()
 app_state: dict[str, Any] = {}
+NOTIFICATION_POLL_INTERVAL_SECONDS = 2.0
 
 
 @asynccontextmanager
@@ -55,6 +57,7 @@ async def lifespan(app: FastAPI):
     engine_client = EngineClient(
         base_url=settings.engine_url_str,
         service_token=settings.service_token,
+        admin_token=settings.admin_api_token,
     )
     replay_guard = ReplayGuard(redis_client)
     runtime = MessageRuntime(session_service=session_service, engine_client=engine_client)
@@ -95,16 +98,41 @@ async def lifespan(app: FastAPI):
     app_state["providers"] = providers
     app_state["openclaw_gateway"] = openclaw_gateway
 
+    notification_routes = _notification_routes(providers)
+    notification_tasks = [
+        asyncio.create_task(
+            _notification_poller(
+                runtime=runtime,
+                provider=provider,
+                channel_type=channel_type,
+                outbound_channel=outbound_channel,
+            )
+        )
+        for channel_type, outbound_channel, provider in notification_routes
+    ]
+    app_state["notification_tasks"] = notification_tasks
+
     log.info(
         "providers initialized",
         telegram_provider=settings.telegram_provider,
         whatsapp_primary_provider=settings.whatsapp_primary_provider,
         whatsapp_fallback_provider=settings.whatsapp_fallback_provider,
+        notification_channels=[
+            {"channel_type": channel_type, "provider": getattr(provider, "provider_name", outbound_channel)}
+            for channel_type, outbound_channel, provider in notification_routes
+        ],
     )
 
     yield
 
     log.info("ConvertChain bot shutting down")
+    for task in notification_tasks:
+        task.cancel()
+    for task in notification_tasks:
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
     for provider in providers.values():
         await provider.close()
     await openclaw_gateway.close()
@@ -118,6 +146,45 @@ app = FastAPI(
     version="1.1.0",
     lifespan=lifespan,
 )
+
+
+def _notification_routes(providers: dict[str, Any]) -> list[tuple[str, str, Any]]:
+    routes: list[tuple[str, str, Any]] = []
+
+    telegram_provider = providers["telegram_direct"]
+    if settings.telegram_uses_openclaw and providers["openclaw_telegram"].supports("telegram", "text"):
+        telegram_provider = providers["openclaw_telegram"]
+    if telegram_provider.supports("telegram", "text"):
+        routes.append(("TELEGRAM", "telegram", telegram_provider))
+
+    whatsapp_provider = providers["meta_whatsapp"]
+    if settings.openclaw_whatsapp_mode == "primary" and providers["openclaw_whatsapp"].supports("whatsapp", "text"):
+        whatsapp_provider = providers["openclaw_whatsapp"]
+    if whatsapp_provider.supports("whatsapp", "text"):
+        routes.append(("WHATSAPP", "whatsapp", whatsapp_provider))
+
+    return routes
+
+
+async def _notification_poller(
+    *,
+    runtime: MessageRuntime,
+    provider: Any,
+    channel_type: str,
+    outbound_channel: str,
+) -> None:
+    while True:
+        try:
+            await runtime.deliver_pending_notifications(
+                provider=provider,
+                channel_type=channel_type,
+                outbound_channel=outbound_channel,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning("notification poller iteration failed", channel_type=channel_type, error=str(exc))
+        await asyncio.sleep(NOTIFICATION_POLL_INTERVAL_SECONDS)
 
 app.add_middleware(
     CORSMiddleware,

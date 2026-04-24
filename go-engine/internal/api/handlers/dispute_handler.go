@@ -3,21 +3,15 @@ package handlers
 import (
 	"context"
 	"net/http"
-	"time"
 
 	"convert-chain/go-engine/internal/api/dto"
+	"convert-chain/go-engine/internal/domain"
+
 	"github.com/gin-gonic/gin"
 )
 
-type DisputeRecord struct {
-	ID        string
-	TradeID   string
-	CreatedAt time.Time
-	TicketRef string
-}
-
 type DisputeService interface {
-	RaiseDispute(ctx context.Context, req dto.DisputeRequest) (*DisputeRecord, error)
+	RaiseDispute(ctx context.Context, req dto.DisputeRequest) (*domain.DisputeRecord, error)
 }
 
 type DisputeHandler struct{ svc DisputeService }

@@ -4,28 +4,31 @@ import (
 	"log/slog"
 	"time"
 
+	"convert-chain/go-engine/internal/api/handlers"
 	"convert-chain/go-engine/internal/api/middleware"
 
 	"github.com/gin-gonic/gin"
-
-	"convert-chain/go-engine/internal/api/handlers"
 )
 
 type RouterConfig struct {
-	ServiceToken   string
-	Logger         *slog.Logger
-	RedisClient    middleware.RedisClient
-	HealthHandler  *handlers.HealthHandler
-	UserHandler    *handlers.UserHandler
-	KYCHandler     *handlers.KYCHandler
-	QuoteHandler   *handlers.QuoteHandler
-	TradeHandler   *handlers.TradeHandler
-	BankHandler    *handlers.BankHandler
-	DisputeHandler *handlers.DisputeHandler
+	ServiceToken           string
+	AdminToken             string
+	Logger                 *slog.Logger
+	RedisClient            middleware.RedisClient
+	HealthHandler          *handlers.HealthHandler
+	UserHandler            *handlers.UserHandler
+	SecurityHandler        *handlers.SecurityHandler
+	AccountHandler         *handlers.AccountHandler
+	KYCHandler             *handlers.KYCHandler
+	QuoteHandler           *handlers.QuoteHandler
+	TradeHandler           *handlers.TradeHandler
+	BankHandler            *handlers.BankHandler
+	DisputeHandler         *handlers.DisputeHandler
+	AdminHandler           *handlers.AdminHandler
+	NotificationHandler    *handlers.NotificationHandler
+	ProviderWebhookHandler *handlers.ProviderWebhookHandler
 }
 
-// NewRouter creates and configures the Gin engine with the handlers used by
-// the HTTP API.
 func NewRouter(cfg RouterConfig) *gin.Engine {
 	engine := gin.New()
 
@@ -35,6 +38,12 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 	if cfg.HealthHandler != nil {
 		engine.GET("/health", cfg.HealthHandler.Health)
 		engine.GET("/ready", cfg.HealthHandler.Ready)
+	}
+
+	if cfg.ProviderWebhookHandler != nil {
+		engine.POST("/webhooks/kyc/smileid", cfg.ProviderWebhookHandler.SmileID)
+		engine.POST("/webhooks/kyc/sumsub", cfg.ProviderWebhookHandler.Sumsub)
+		engine.POST("/webhooks/graph", cfg.ProviderWebhookHandler.Graph)
 	}
 
 	v1 := engine.Group("/api/v1")
@@ -60,6 +69,15 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 			v1.POST("/consent", cfg.UserHandler.RecordConsent)
 		}
 
+		if cfg.SecurityHandler != nil {
+			v1.POST("/security/transaction-password/setup", cfg.SecurityHandler.SetupTransactionPassword)
+		}
+
+		if cfg.AccountHandler != nil {
+			v1.GET("/account/delete/quota/:user_id", cfg.AccountHandler.GetDeletionQuota)
+			v1.POST("/account/delete", cfg.AccountHandler.DeleteAccount)
+		}
+
 		if cfg.KYCHandler != nil {
 			v1.POST("/kyc/submit", cfg.KYCHandler.SubmitKYC)
 			v1.GET("/kyc/status/:user_id", cfg.KYCHandler.GetKYCStatus)
@@ -76,10 +94,15 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 		if cfg.TradeHandler != nil {
 			if tradeLimiter != nil {
 				v1.POST("/trades", tradeLimiter, cfg.TradeHandler.CreateTrade)
+				v1.POST("/trades/confirm", tradeLimiter, cfg.TradeHandler.ConfirmTrade)
 			} else {
 				v1.POST("/trades", cfg.TradeHandler.CreateTrade)
+				v1.POST("/trades/confirm", cfg.TradeHandler.ConfirmTrade)
 			}
+			v1.GET("/users/:user_id/trades/active", cfg.TradeHandler.GetActiveTrade)
+			v1.GET("/users/:user_id/trades/status-context", cfg.TradeHandler.GetTradeStatusContext)
 			v1.GET("/trades/:trade_id", cfg.TradeHandler.GetTrade)
+			v1.GET("/trades/:trade_id/receipt", cfg.TradeHandler.GetTradeReceipt)
 		}
 
 		if cfg.BankHandler != nil {
@@ -91,6 +114,21 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 
 		if cfg.DisputeHandler != nil {
 			v1.POST("/disputes", cfg.DisputeHandler.RaiseDispute)
+		}
+
+		if cfg.NotificationHandler != nil {
+			v1.GET("/notifications/pending", cfg.NotificationHandler.GetPending)
+			v1.GET("/notifications/metrics", cfg.NotificationHandler.Metrics)
+			v1.POST("/notifications/:id/ack", cfg.NotificationHandler.Ack)
+		}
+
+		if cfg.AdminHandler != nil && cfg.AdminToken != "" {
+			admin := v1.Group("/admin")
+			admin.Use(middleware.AdminTokenAuth(cfg.AdminToken))
+			admin.GET("/disputes", cfg.AdminHandler.ListDisputes)
+			admin.GET("/disputes/:id", cfg.AdminHandler.GetDispute)
+			admin.POST("/disputes/:id/resolve", cfg.AdminHandler.ResolveDispute)
+			admin.GET("/providers/readiness", cfg.AdminHandler.GetProviderReadiness)
 		}
 	}
 

@@ -4,11 +4,11 @@
 // It answers the user's question: "How much NGN will I get for X BTC?"
 //
 // The flow:
-//   1. Fetch BTC/USDT price from Binance (or Bybit fallback)
-//   2. Fetch USDC/NGN rate from Graph Finance
-//   3. Calculate gross amount: BTC → USDC → NGN
-//   4. Apply tiered fee (1%–3% based on volume)
-//   5. Return a locked quote valid for 120 seconds
+//  1. Fetch BTC/USDT price from Binance (or Bybit fallback)
+//  2. Fetch USDC/NGN rate from Graph Finance
+//  3. Calculate gross amount: BTC → USDC → NGN
+//  4. Apply tiered fee (1%–3% based on volume)
+//  5. Return a locked quote valid for 120 seconds
 //
 // Price caching: Exchange prices are cached in Redis for 10 seconds
 // to avoid hammering exchange APIs (they have rate limits).
@@ -104,17 +104,22 @@ type QuoteRequest struct {
 
 // QuoteResponse is the locked price quote returned to the user.
 type QuoteResponse struct {
-	QuoteID      string    `json:"quote_id"`
-	FromCurrency string    `json:"from_currency"`
-	ToCurrency   string    `json:"to_currency"`
-	FromAmount   int64     `json:"from_amount"`  // What user sells (satoshis)
-	GrossAmount  int64     `json:"gross_amount"` // Before fee (kobo)
-	FeeAmount    int64     `json:"fee_amount"`   // Platform fee (kobo)
-	ToAmount     int64     `json:"to_amount"`    // What user receives (kobo)
-	FeeBPS       int       `json:"fee_bps"`      // Fee in basis points
-	ExchangeRate string    `json:"exchange_rate"` // BTC/USDC rate used
-	FiatRate     string    `json:"fiat_rate"`     // USDC/NGN rate used
-	ValidUntil   time.Time `json:"valid_until"`   // When this quote expires
+	QuoteID               string    `json:"quote_id"`
+	FromCurrency          string    `json:"from_currency"`
+	ToCurrency            string    `json:"to_currency"`
+	FromAmount            int64     `json:"from_amount"`   // What user sells (satoshis)
+	GrossAmount           int64     `json:"gross_amount"`  // Before fee (kobo)
+	FeeAmount             int64     `json:"fee_amount"`    // Platform fee (kobo)
+	ToAmount              int64     `json:"to_amount"`     // What user receives (kobo)
+	FeeBPS                int       `json:"fee_bps"`       // Fee in basis points
+	ExchangeRate          string    `json:"exchange_rate"` // BTC/USDC rate used
+	FiatRate              string    `json:"fiat_rate"`     // USDC/NGN rate used
+	ValidUntil            time.Time `json:"valid_until"`   // When this quote expires
+	PricingMode           string    `json:"pricing_mode"`
+	PriceSource           string    `json:"price_source"`
+	FiatRateSource        string    `json:"fiat_rate_source"`
+	MarketRatePerUnitKobo int64     `json:"market_rate_per_unit_kobo"`
+	UserRatePerUnitKobo   int64     `json:"user_rate_per_unit_kobo"`
 }
 
 // ──────────────────────────────────────────────
@@ -124,17 +129,19 @@ type QuoteResponse struct {
 // GetQuote generates a locked price quote for a crypto-to-fiat conversion.
 //
 // This is the most important function in the revenue pipeline:
-//   User sees the quote → accepts it → trade is created at this exact price
+//
+//	User sees the quote → accepts it → trade is created at this exact price
 //
 // The math flow:
-//   0.25 BTC (25,000,000 satoshis)
-//   × 67,123.45 BTC/USDT exchange rate
-//   = 16,780.8625 USDT
-//   × 1,625.00 USDT/NGN fiat rate
-//   = ₦27,268,901.56 gross (2,726,890,156 kobo)
-//   × (1 - 0.02) fee multiplier (2% fee)
-//   = ₦26,723,523.53 net (2,672,352,353 kobo)
-//   Fee: ₦545,378.03 (54,537,803 kobo)
+//
+//	0.25 BTC (25,000,000 satoshis)
+//	× 67,123.45 BTC/USDT exchange rate
+//	= 16,780.8625 USDT
+//	× 1,625.00 USDT/NGN fiat rate
+//	= ₦27,268,901.56 gross (2,726,890,156 kobo)
+//	× (1 - 0.02) fee multiplier (2% fee)
+//	= ₦26,723,523.53 net (2,672,352,353 kobo)
+//	Fee: ₦545,378.03 (54,537,803 kobo)
 func (e *PricingEngine) GetQuote(ctx context.Context, req QuoteRequest) (*QuoteResponse, error) {
 	e.logger.Info("Generating quote",
 		"user_id", req.UserID,
@@ -144,7 +151,7 @@ func (e *PricingEngine) GetQuote(ctx context.Context, req QuoteRequest) (*QuoteR
 	)
 
 	// ── Step 1: Get crypto price (Binance primary, Bybit fallback) ──
-	cryptoPrice, err := e.getBestCryptoPrice(ctx, req.FromCurrency)
+	cryptoPrice, priceSource, err := e.getBestCryptoPrice(ctx, req.FromCurrency)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get crypto price: %w", err)
 	}
@@ -215,17 +222,22 @@ func (e *PricingEngine) GetQuote(ctx context.Context, req QuoteRequest) (*QuoteR
 
 	// ── Step 6: Build the quote response ──
 	quote := &QuoteResponse{
-		QuoteID:      uuid.New().String(),
-		FromCurrency: req.FromCurrency,
-		ToCurrency:   req.ToCurrency,
-		FromAmount:   req.FromAmount,
-		GrossAmount:  grossKobo,
-		FeeAmount:    feeKobo,
-		ToAmount:     netKobo,
-		FeeBPS:       feeBPS,
-		ExchangeRate: cryptoPrice.Text('f', 8), // 8 decimal places
-		FiatRate:     fiatRate.Text('f', 2),     // 2 decimal places
-		ValidUntil:   time.Now().Add(QuoteTTL),
+		QuoteID:               uuid.New().String(),
+		FromCurrency:          req.FromCurrency,
+		ToCurrency:            req.ToCurrency,
+		FromAmount:            req.FromAmount,
+		GrossAmount:           grossKobo,
+		FeeAmount:             feeKobo,
+		ToAmount:              netKobo,
+		FeeBPS:                feeBPS,
+		ExchangeRate:          cryptoPrice.Text('f', 8), // 8 decimal places
+		FiatRate:              fiatRate.Text('f', 2),    // 2 decimal places
+		ValidUntil:            time.Now().Add(QuoteTTL),
+		PricingMode:           "live",
+		PriceSource:           priceSource,
+		FiatRateSource:        "graph",
+		MarketRatePerUnitKobo: ratePerUnitKobo(grossKobo, req.FromAmount, req.FromCurrency),
+		UserRatePerUnitKobo:   ratePerUnitKobo(netKobo, req.FromAmount, req.FromCurrency),
 	}
 
 	e.logger.Info("Quote generated",
@@ -244,10 +256,10 @@ func (e *PricingEngine) GetQuote(ctx context.Context, req QuoteRequest) (*QuoteR
 // ──────────────────────────────────────────────
 
 // getBestCryptoPrice tries to get the price from:
-//   1. Redis cache (fastest, < 1ms)
-//   2. Primary exchange — Binance (fast, < 100ms)
-//   3. Fallback exchange — Bybit (last resort)
-func (e *PricingEngine) getBestCryptoPrice(ctx context.Context, symbol string) (*big.Float, error) {
+//  1. Redis cache (fastest, < 1ms)
+//  2. Primary exchange — Binance (fast, < 100ms)
+//  3. Fallback exchange — Bybit (last resort)
+func (e *PricingEngine) getBestCryptoPrice(ctx context.Context, symbol string) (*big.Float, string, error) {
 	// The trading pair symbol on exchanges
 	// We trade against USDT (most liquid stablecoin pair)
 	tradingPair := symbol + "USDT"
@@ -255,7 +267,7 @@ func (e *PricingEngine) getBestCryptoPrice(ctx context.Context, symbol string) (
 	// If the user is selling USDC or USDT, the "price" is 1.0
 	// (1 USDC = 1 USDT, approximately)
 	if symbol == "USDC" || symbol == "USDT" {
-		return big.NewFloat(1.0), nil
+		return big.NewFloat(1.0), "stablecoin-parity", nil
 	}
 
 	cacheKey := fmt.Sprintf("price:%s", tradingPair)
@@ -265,28 +277,34 @@ func (e *PricingEngine) getBestCryptoPrice(ctx context.Context, symbol string) (
 		price, ok := new(big.Float).SetString(cached)
 		if ok {
 			e.logger.Debug("Price from cache", "pair", tradingPair, "price", cached)
-			return price, nil
+			return price, "cache", nil
 		}
 	}
 
 	// ── Try primary exchange (Binance) ──
 	price, err := e.primary.GetSpotPrice(ctx, tradingPair)
 	if err != nil {
+		if e.fallback == nil {
+			return nil, "", fmt.Errorf("primary price source failed and fallback is disabled: %s", err)
+		}
+
 		e.logger.Warn("Primary exchange failed, trying fallback",
 			"primary", e.primary.Name(),
+			"fallback", e.fallback.Name(),
 			"error", err,
 		)
 
 		// ── Fallback to Bybit ──
 		price, err = e.fallback.GetSpotPrice(ctx, tradingPair)
 		if err != nil {
-			return nil, fmt.Errorf("all price sources failed: primary (%s) and fallback (%s)",
+			return nil, "", fmt.Errorf("all price sources failed: primary (%s) and fallback (%s)",
 				e.primary.Name(), e.fallback.Name())
 		}
 		e.logger.Info("Using fallback exchange price",
 			"exchange", e.fallback.Name(),
 			"pair", tradingPair,
 		)
+		return price, e.fallback.Name(), nil
 	}
 
 	// ── Cache the price in Redis ──
@@ -296,7 +314,7 @@ func (e *PricingEngine) getBestCryptoPrice(ctx context.Context, symbol string) (
 		e.logger.Warn("Failed to cache price", "error", err)
 	}
 
-	return price, nil
+	return price, e.primary.Name(), nil
 }
 
 // ──────────────────────────────────────────────
@@ -329,5 +347,36 @@ func (e *PricingEngine) calculateFee(amountMinorUnits int64) int {
 		return 150 // 1.5%
 	default: // $10k+
 		return 100 // 1%
+	}
+}
+
+func ratePerUnitKobo(totalKobo int64, fromAmount int64, currency string) int64 {
+	if totalKobo <= 0 || fromAmount <= 0 {
+		return 0
+	}
+
+	divisor := float64(currencyDivisor(currency))
+	if divisor <= 0 {
+		return 0
+	}
+
+	units := float64(fromAmount) / divisor
+	if units <= 0 {
+		return 0
+	}
+
+	return int64(float64(totalKobo) / units)
+}
+
+func currencyDivisor(currency string) int64 {
+	switch currency {
+	case "BTC", "BNB":
+		return 100_000_000
+	case "ETH":
+		return 1_000_000_000_000_000_000
+	case "USDT", "USDC":
+		return 1_000_000
+	default:
+		return 1
 	}
 }

@@ -58,6 +58,7 @@ $cfg = Read-EnvFile -Path $envPath
 $vaultToken = if ($cfg.ContainsKey("VAULT_TOKEN")) { $cfg["VAULT_TOKEN"] } else { "devroot" }
 $vaultAddr = if ($cfg.ContainsKey("VAULT_ADDR") -and $cfg["VAULT_ADDR"]) { $cfg["VAULT_ADDR"] } else { "http://127.0.0.1:8200" }
 $serviceToken = if ($cfg.ContainsKey("SERVICE_TOKEN")) { $cfg["SERVICE_TOKEN"] } else { "convertchain-dev-service-token-change-me" }
+$adminApiToken = if ($cfg.ContainsKey("ADMIN_API_TOKEN") -and $cfg["ADMIN_API_TOKEN"]) { $cfg["ADMIN_API_TOKEN"] } else { "convertchain-dev-admin-token-change-me" }
 
 $piiKeyHex = if ($cfg.ContainsKey("PII_KEY_HEX") -and $cfg["PII_KEY_HEX"]) {
     $cfg["PII_KEY_HEX"]
@@ -79,7 +80,9 @@ Vault-KvPut -Token $vaultToken -Addr $vaultAddr -Container $VaultContainer -Path
 )
 
 Vault-KvPut -Token $vaultToken -Addr $vaultAddr -Container $VaultContainer -Path "secret/convertchain/graph" -KvPairs @(
-    "api_key=$($cfg["GRAPH_API_KEY"] )"
+    "api_key=$($cfg["GRAPH_API_KEY"] )",
+    "webhook_secret=$($cfg["GRAPH_WEBHOOK_SECRET"] )",
+    "webhook_public_base_url=$($cfg["GRAPH_WEBHOOK_PUBLIC_BASE_URL"] )"
 )
 
 Vault-KvPut -Token $vaultToken -Addr $vaultAddr -Container $VaultContainer -Path "secret/convertchain/smileid" -KvPairs @(
@@ -93,6 +96,10 @@ Vault-KvPut -Token $vaultToken -Addr $vaultAddr -Container $VaultContainer -Path
 
 Vault-KvPut -Token $vaultToken -Addr $vaultAddr -Container $VaultContainer -Path "secret/convertchain/service_token" -KvPairs @(
     "token=$serviceToken"
+)
+
+Vault-KvPut -Token $vaultToken -Addr $vaultAddr -Container $VaultContainer -Path "secret/convertchain/admin_token" -KvPairs @(
+    "token=$adminApiToken"
 )
 
 if (($cfg["SUMSUB_APP_TOKEN"]) -or ($cfg["SUMSUB_SECRET_KEY"])) {
@@ -109,7 +116,8 @@ $paths = @(
     "convertchain/graph",
     "convertchain/smileid",
     "convertchain/pii_key",
-    "convertchain/service_token"
+    "convertchain/service_token",
+    "convertchain/admin_token"
 )
 
 foreach ($path in $paths) {

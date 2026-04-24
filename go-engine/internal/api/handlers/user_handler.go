@@ -44,9 +44,10 @@ func (h *UserHandler) CreateOrGetUser(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, dto.CreateUserResponse{
-		UserID:    user.ID.String(),
-		Status:    status,
-		KYCStatus: user.Status,
+		UserID:                 user.ID.String(),
+		Status:                 status,
+		KYCStatus:              user.Status,
+		TransactionPasswordSet: user.TxnPasswordHash != nil && *user.TxnPasswordHash != "",
 	})
 }
 

@@ -20,15 +20,15 @@ type TradeRepository interface {
 	GetTradeByID(ctx context.Context, tradeID string) (*domain.Trade, error)
 
 	// UpdateTradeStatus persists a new status + optional metadata to the database.
-	// metadata is a free-form map (stored as JSONB in Postgres).
+	// metadata is a free-form map that is translated into the relevant trade fields.
 	UpdateTradeStatus(ctx context.Context, tradeID string, status string, metadata map[string]interface{}) error
 
-	// GetPendingPayouts returns trades in DEPOSIT_CONFIRMED status that have not
-	// yet been paid out.
+	// GetPendingPayouts returns trades in CONVERSION_COMPLETED status that have
+	// not yet had a payout initiated.
 	GetPendingPayouts(ctx context.Context) ([]*domain.Trade, error)
 
-	// MarkPayoutComplete records the Graph Finance payout reference and marks the
-	// trade COMPLETED.
+	// MarkPayoutComplete records the Graph payout reference and marks the trade
+	// as PAYOUT_COMPLETED.
 	MarkPayoutComplete(ctx context.Context, tradeID string, payoutRef string) error
 }
 
@@ -68,10 +68,29 @@ type DepositResult struct {
 	TxHash string
 }
 
+// ConversionExecutor defines the exchange-side conversion operations.
+type ConversionExecutor interface {
+	// ConvertToStable executes the sandbox/testnet market conversion for the
+	// received trade asset and returns provider execution metadata.
+	ConvertToStable(ctx context.Context, asset string, fromAmount int64) (*ConversionResult, error)
+}
+
+// ConversionResult is the normalized result returned by the conversion layer.
+type ConversionResult struct {
+	Exchange    string
+	OrderID     string
+	Symbol      string
+	Status      string
+	ExecutedQty string
+	QuoteQty    string
+}
+
 // GraphFinanceClient defines the payout operations.
 type GraphFinanceClient interface {
-	// ConvertAndPay converts platform funds and initiates a payout to the user's
-	// registered bank account. payoutAmount is expressed in the trade's stored
-	// payout minor units (for NGN this is kobo).
+	// ConvertAndPay creates the Graph payout request for a trade and returns the
+	// provider payout reference once the payout has been accepted for processing.
 	ConvertAndPay(ctx context.Context, bankAccountID string, payoutAmount int64) (string, error)
+
+	// GetPayoutStatus fetches the latest provider-side status for a payout.
+	GetPayoutStatus(ctx context.Context, payoutRef string) (string, error)
 }

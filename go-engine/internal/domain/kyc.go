@@ -25,14 +25,15 @@ type KYCDocument struct {
 
 // KYCStatusSummary is the normalized KYC state returned to the API layer.
 type KYCStatusSummary struct {
-	UserID          uuid.UUID  `json:"user_id"`
-	Status          string     `json:"status"`
-	Tier            string     `json:"tier"`
-	Provider        string     `json:"provider,omitempty"`
-	ProviderRef     string     `json:"provider_ref,omitempty"`
-	SubmittedAt     *time.Time `json:"submitted_at,omitempty"`
-	CompletedAt     *time.Time `json:"completed_at,omitempty"`
-	RejectionReason string     `json:"rejection_reason,omitempty"`
+	UserID                 uuid.UUID  `json:"user_id"`
+	Status                 string     `json:"status"`
+	Tier                   string     `json:"tier"`
+	Provider               string     `json:"provider,omitempty"`
+	ProviderRef            string     `json:"provider_ref,omitempty"`
+	SubmittedAt            *time.Time `json:"submitted_at,omitempty"`
+	CompletedAt            *time.Time `json:"completed_at,omitempty"`
+	RejectionReason        string     `json:"rejection_reason,omitempty"`
+	TransactionPasswordSet bool       `json:"transaction_password_set"`
 }
 
 // BankAccount represents a user's linked Nigerian bank account for payouts.
@@ -87,4 +88,33 @@ type WebhookEvent struct {
 	ProcessedAt *time.Time `json:"processed_at" db:"processed_at"`
 	Error       *string    `json:"error" db:"error"`
 	CreatedAt   time.Time  `json:"created_at" db:"created_at"`
+}
+
+// NotificationEvent is a delivery outbox row produced by the Go engine and
+// consumed by the Python Telegram runtime.
+type NotificationEvent struct {
+	ID            uuid.UUID  `json:"id" db:"id"`
+	UserID        uuid.UUID  `json:"user_id" db:"user_id"`
+	ChannelType   string     `json:"channel_type" db:"channel_type"`
+	TradeID       *uuid.UUID `json:"trade_id" db:"trade_id"`
+	EventType     string     `json:"event_type" db:"event_type"`
+	Payload       string     `json:"payload" db:"payload"`
+	DedupeKey     string     `json:"dedupe_key" db:"dedupe_key"`
+	Delivered     bool       `json:"delivered" db:"delivered"`
+	DeliveredAt   *time.Time `json:"delivered_at" db:"delivered_at"`
+	DeliveryError *string    `json:"delivery_error" db:"delivery_error"`
+	CreatedAt     time.Time  `json:"created_at" db:"created_at"`
+}
+
+// PendingNotification is the denormalized outbox item handed to the messaging layer.
+type PendingNotification struct {
+	ID          uuid.UUID              `json:"id"`
+	ChannelType string                 `json:"channel_type"`
+	RecipientID string                 `json:"recipient_id"`
+	TradeID     string                 `json:"trade_id,omitempty"`
+	EventType   string                 `json:"event_type"`
+	Payload     map[string]interface{} `json:"payload"`
+	ClaimToken  string                 `json:"claim_token,omitempty"`
+	Attempts    int                    `json:"attempts"`
+	CreatedAt   time.Time              `json:"created_at"`
 }

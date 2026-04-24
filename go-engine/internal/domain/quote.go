@@ -30,6 +30,13 @@ type Quote struct {
 	FeeBPS    int   `json:"fee_bps" db:"fee_bps"`       // Basis points (200 = 2%)
 	FeeAmount int64 `json:"fee_amount" db:"fee_amount"` // Fee in to_currency minor units
 
+	// Pricing disclosure fields used by client UX.
+	MarketRatePerUnitKobo int64  `json:"market_rate_per_unit_kobo" db:"-"`
+	UserRatePerUnitKobo   int64  `json:"user_rate_per_unit_kobo" db:"-"`
+	PricingMode           string `json:"pricing_mode" db:"-"`
+	PriceSource           string `json:"price_source" db:"-"`
+	FiatRateSource        string `json:"fiat_rate_source" db:"-"`
+
 	// Lifecycle
 	ValidUntil time.Time  `json:"valid_until" db:"valid_until"`
 	AcceptedAt *time.Time `json:"accepted_at" db:"accepted_at"`

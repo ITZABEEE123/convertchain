@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any
 
 import structlog
@@ -34,7 +34,11 @@ STEP_COLLECT_NIN = "COLLECT_NIN"
 STEP_COLLECT_BVN = "COLLECT_BVN"
 STEP_UPLOAD_SELFIE = "UPLOAD_SELFIE"
 STEP_KYC_SUBMITTED = "KYC_SUBMITTED"
+STEP_SET_TX_PASSWORD = "SET_TX_PASSWORD"
+STEP_CONFIRM_TX_PASSWORD = "CONFIRM_TX_PASSWORD"
 STEP_COMPLETED = "COMPLETED"
+
+TX_PASSWORD_SESSION_TIMEOUT_SECONDS = 300
 
 # ── Validation patterns ────────────────────────────────────────────────────────
 # Nigerian mobile phone prefixes (MTN, Airtel, Glo, 9mobile):
@@ -137,15 +141,23 @@ class OnboardingFlow:
             kyc_status_result = {}
 
         if kyc_status_result.get("kyc_status") == "approved":
-            await self._session.set(user_id, {
-                "flow": None,
+            existing_session = {
+                "flow": "onboarding",
                 "step": None,
                 "channel": self._channel,
                 "engine_user_id": engine_user_id,
-                "onboarded": True,
+                "onboarded": False,
                 "data": {},
-            })
-            return self._verified_main_menu(sender_name, recovered=True)
+            }
+            if kyc_status_result.get("transaction_password_set", True):
+                await self._mark_user_onboarded(user_id, existing_session)
+                return self._verified_main_menu(sender_name, recovered=True)
+            return await self._begin_transaction_password_setup(
+                user_id,
+                existing_session,
+                sender_name=sender_name,
+                recovered=True,
+            )
 
         await self._session.set(user_id, {
             "flow": "onboarding",
@@ -196,6 +208,8 @@ class OnboardingFlow:
             STEP_COLLECT_BVN:   self._handle_collect_bvn,
             STEP_UPLOAD_SELFIE: self._handle_upload_selfie,
             STEP_KYC_SUBMITTED: self._handle_kyc_submitted,
+            STEP_SET_TX_PASSWORD: self._handle_set_tx_password,
+            STEP_CONFIRM_TX_PASSWORD: self._handle_confirm_tx_password,
         }
 
         handler = step_handlers.get(step)
@@ -464,13 +478,20 @@ class OnboardingFlow:
                     )
                 else:
                     if kyc_status_result.get("kyc_status") == "approved":
-                        await self._mark_user_onboarded(user_id, session)
                         log.info(
                             "Recovered from duplicate KYC submission for already-approved user",
                             user_id=session.get("engine_user_id"),
                         )
                         display_name = session["data"].get("first_name", "")
-                        return self._verified_main_menu(display_name, recovered=True)
+                        if kyc_status_result.get("transaction_password_set", True):
+                            await self._mark_user_onboarded(user_id, session)
+                            return self._verified_main_menu(display_name, recovered=True)
+                        return await self._begin_transaction_password_setup(
+                            user_id,
+                            session,
+                            sender_name=display_name,
+                            recovered=True,
+                        )
 
             log.error("KYC submission failed", error=str(e), user_id=session.get("engine_user_id"))
             return (
@@ -478,6 +499,30 @@ class OnboardingFlow:
                 "We could not verify your information at this time.\n"
                 "Please try again in a few minutes.\n\n"
                 "If this keeps happening, please contact support@convertchain.com"
+            )
+
+        immediate_status = str(kyc_result.get("status") or "").upper()
+        immediate_reason = (
+            kyc_result.get("rejection_reason")
+            or kyc_result.get("reason")
+            or "Identity could not be verified"
+        )
+
+        if immediate_status == "APPROVED":
+            session["data"]["kyc_id"] = kyc_id
+            return await self._begin_transaction_password_setup(
+                user_id,
+                session,
+                sender_name=session["data"].get("first_name", ""),
+                recovered=False,
+            )
+
+        if immediate_status == "REJECTED":
+            await self._session.delete(user_id)
+            return (
+                "Verification failed.\n\n"
+                f"Reason: {immediate_reason}\n\n"
+                "Please check your NIN, BVN, name, and date of birth, then type *hi* to try again."
             )
 
         session["step"] = STEP_UPLOAD_SELFIE
@@ -544,20 +589,26 @@ class OnboardingFlow:
 
         if kyc_status == "approved":
             # KYC passed! Complete onboarding.
-            await self._mark_user_onboarded(user_id, session)
-
             first_name = session["data"].get("first_name", "")
-            return (
-                f"🎉 *Congratulations, {first_name}! You're verified!*\n\n"
-                "Your identity has been confirmed. Your ConvertChain account is ready.\n\n"
-                "━━━━━━━━━━━━━━━━━━━━━━\n"
-                "💱 *Start Trading*\n\n"
-                "To sell crypto, type:\n"
-                "  `sell 0.25 BTC`\n"
-                "  `sell 1 ETH`\n"
-                "  `sell 100 USDT`\n\n"
-                "Supported coins: BTC, ETH, USDT, USDC, BNB\n\n"
-                "Type *help* for all available commands."
+            if kyc_status_result.get("transaction_password_set", True):
+                await self._mark_user_onboarded(user_id, session)
+                return (
+                    f"🎉 *Congratulations, {first_name}! You're verified!*\n\n"
+                    "Your identity has been confirmed. Your ConvertChain account is ready.\n\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━\n"
+                    "💱 *Start Trading*\n\n"
+                    "To sell crypto, type:\n"
+                    "  `sell 0.25 BTC`\n"
+                    "  `sell 1 ETH`\n"
+                    "  `sell 100 USDT`\n\n"
+                    "Supported coins: BTC, ETH, USDT, USDC, BNB\n\n"
+                    "Type *help* for all available commands."
+                )
+            return await self._begin_transaction_password_setup(
+                user_id,
+                session,
+                sender_name=first_name,
+                recovered=False,
             )
 
         elif kyc_status == "rejected":
@@ -586,6 +637,83 @@ class OnboardingFlow:
                 "_If it's been more than 30 minutes, please contact support._"
             )
 
+    async def _handle_set_tx_password(
+        self, user_id: str, session: dict, text: str, image_id: str | None
+    ) -> str:
+        if self._transaction_password_prompt_expired(session):
+            return await self._reset_transaction_password_prompt(user_id, session)
+
+        password = text.strip()
+        if len(password) < 6:
+            return (
+                "Your transaction password must be at least 6 characters.\n\n"
+                "Choose something you will remember but others cannot guess."
+            )
+        if " " in password:
+            return "Transaction password cannot contain spaces. Please enter it again."
+
+        session.setdefault("data", {})["pending_transaction_password"] = password
+        session["data"]["tx_password_started_at"] = datetime.now(timezone.utc).isoformat()
+        session["step"] = STEP_CONFIRM_TX_PASSWORD
+        await self._session.set(user_id, session)
+
+        return (
+            "Confirm your transaction password.\n\n"
+            "Send the same password again to finish securing your account."
+        )
+
+    async def _handle_confirm_tx_password(
+        self, user_id: str, session: dict, text: str, image_id: str | None
+    ) -> str:
+        if self._transaction_password_prompt_expired(session):
+            return await self._reset_transaction_password_prompt(user_id, session)
+
+        confirmation = text.strip()
+        pending_password = session.get("data", {}).get("pending_transaction_password", "")
+        if not pending_password:
+            return await self._reset_transaction_password_prompt(user_id, session)
+
+        if confirmation != pending_password:
+            session["step"] = STEP_SET_TX_PASSWORD
+            session["data"].pop("pending_transaction_password", None)
+            session["data"]["tx_password_started_at"] = datetime.now(timezone.utc).isoformat()
+            await self._session.set(user_id, session)
+            return (
+                "Those passwords did not match.\n\n"
+                "Let's try again. Enter a new transaction password."
+            )
+
+        try:
+            await self._engine.setup_transaction_password(
+                {
+                    "user_id": session["engine_user_id"],
+                    "transaction_password": pending_password,
+                    "confirm_password": confirmation,
+                }
+            )
+        except EngineError as exc:
+            log.error("Failed to set transaction password", error=str(exc), user_id=session.get("engine_user_id"))
+            return (
+                "We could not save your transaction password right now.\n\n"
+                "Please try again in a moment."
+            )
+
+        session.setdefault("data", {}).pop("pending_transaction_password", None)
+        session["data"].pop("tx_password_started_at", None)
+        await self._mark_user_onboarded(user_id, session)
+
+        first_name = session.get("data", {}).get("first_name", "")
+        return (
+            "✅ *Step 9 of 9 — Account Secured*\n\n"
+            f"Account secured successfully, {first_name or 'there'}.\n\n"
+            "Your transaction password is now active and your sandbox setup is complete.\n\n"
+            "You can now:\n"
+            "- `add bank`\n"
+            "- `sell 0.25 BTC`\n"
+            "- `status`\n"
+            "- `help`"
+        )
+
     # ═══════════════════════════════════════════════════════════════════════════
     # HELPERS
     # ═══════════════════════════════════════════════════════════════════════════
@@ -594,7 +722,68 @@ class OnboardingFlow:
         session["flow"] = None
         session["step"] = None
         session["onboarded"] = True
+        session["transaction_password_set"] = True
+        session.setdefault("data", {}).pop("pending_transaction_password", None)
+        session["data"].pop("tx_password_started_at", None)
         await self._session.set(user_id, session)
+
+    async def _begin_transaction_password_setup(
+        self,
+        user_id: str,
+        session: dict[str, Any],
+        *,
+        sender_name: str,
+        recovered: bool,
+    ) -> str:
+        session["flow"] = "onboarding"
+        session["step"] = STEP_SET_TX_PASSWORD
+        session["onboarded"] = False
+        session.setdefault("data", {})["tx_password_started_at"] = datetime.now(timezone.utc).isoformat()
+        await self._session.set(user_id, session)
+
+        intro = (
+            f"Welcome back, {sender_name}.\n\n"
+            if sender_name and sender_name != "there"
+            else "Welcome back.\n\n"
+        )
+        if not recovered:
+            intro = (
+                "✅ *Step 7 of 9 — Identity Verified*\n\n"
+                f"Congratulations, {sender_name or 'there'}! Your identity has been verified.\n\n"
+                "In this local sandbox, the verification provider approved your account without requiring an extra selfie step.\n\n"
+            )
+
+        return (
+            f"{intro}"
+            "*Step 8 of 9 — Secure Your Account*\n\n"
+            "Before you can trade, set a transaction password.\n\n"
+            "You will use this password whenever you confirm a trade or delete your account.\n\n"
+            "Send a transaction password with at least 6 characters.\n"
+            "This setup prompt expires after 5 minutes of inactivity."
+        )
+
+    async def _reset_transaction_password_prompt(self, user_id: str, session: dict[str, Any]) -> str:
+        session.setdefault("data", {}).pop("pending_transaction_password", None)
+        session["data"]["tx_password_started_at"] = datetime.now(timezone.utc).isoformat()
+        session["step"] = STEP_SET_TX_PASSWORD
+        await self._session.set(user_id, session)
+        return (
+            "Your transaction-password setup session expired.\n\n"
+            "Please enter a new transaction password to continue."
+        )
+
+    @staticmethod
+    def _transaction_password_prompt_expired(session: dict[str, Any]) -> bool:
+        started_at = session.get("data", {}).get("tx_password_started_at")
+        if not started_at:
+            return False
+
+        try:
+            started = datetime.fromisoformat(started_at)
+        except ValueError:
+            return True
+
+        return (datetime.now(timezone.utc) - started).total_seconds() > TX_PASSWORD_SESSION_TIMEOUT_SECONDS
 
     def _verified_main_menu(self, name: str, *, recovered: bool = False) -> str:
         greeting = f"Welcome back, {name}!" if name and name != "there" else "Welcome back!"
@@ -607,8 +796,14 @@ class OnboardingFlow:
             "  - sell 0.25 BTC\n"
             "  - sell 1 ETH\n"
             "  - sell 100 USDT\n\n"
+            "Banks\n"
+            "  - add bank\n"
+            "  - banks\n"
+            "  - use bank 1\n\n"
             "Check Status\n"
             "  - status\n\n"
+            "Account\n"
+            "  - delete account\n\n"
             "Help\n"
             "  - help"
         )

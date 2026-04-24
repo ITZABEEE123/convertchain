@@ -45,6 +45,17 @@ type User struct {
 	// Created when KYC is approved and the user is registered for payouts.
 	GraphPersonID *string `json:"graph_person_id" db:"graph_person_id"`
 
+	// Transaction password security state.
+	TxnPasswordHash           *string    `json:"-" db:"txn_password_hash"`
+	TxnPasswordSetAt          *time.Time `json:"txn_password_set_at" db:"txn_password_set_at"`
+	TxnPasswordFailedAttempts int        `json:"-" db:"txn_password_failed_attempts"`
+	TxnPasswordLockedUntil    *time.Time `json:"txn_password_locked_until" db:"txn_password_locked_until"`
+
+	// Privacy-preserving lifecycle fields used for anonymized deletion.
+	DeletedAt           *time.Time `json:"deleted_at" db:"deleted_at"`
+	AnonymizedAt        *time.Time `json:"anonymized_at" db:"anonymized_at"`
+	DeletionSubjectHash *string    `json:"-" db:"deletion_subject_hash"`
+
 	// Consent tracking — legal requirement in Nigeria
 	ConsentGivenAt *time.Time `json:"consent_given_at" db:"consent_given_at"`
 	ConsentIP      *string    `json:"consent_ip" db:"consent_ip"`

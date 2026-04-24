@@ -116,7 +116,7 @@ func (s *ApplicationService) submitTier2PlusKYC(ctx context.Context, user *domai
 
 func (s *ApplicationService) runTier1Provider(ctx context.Context, req dto.KYCSubmitRequest, phone string) (*kyc.KYCResult, error) {
 	if s.kycOrchestrator != nil && s.kycOrchestrator.SupportsTier1() {
-		return s.kycOrchestrator.SubmitTier1KYC(ctx, kyc.Tier1KYCRequest{
+		result, err := s.kycOrchestrator.SubmitTier1KYC(ctx, kyc.Tier1KYCRequest{
 			UserID:      uuid.MustParse(req.UserID),
 			BVN:         req.BVN,
 			NIN:         req.NIN,
@@ -125,6 +125,30 @@ func (s *ApplicationService) runTier1Provider(ctx context.Context, req dto.KYCSu
 			DateOfBirth: req.DateOfBirth,
 			PhoneNumber: phone,
 		})
+		if err != nil {
+			if s.options.AutoApproveKYC {
+				if s.logger != nil {
+					s.logger.Warn(
+						"tier1 KYC provider failed in auto-approve mode; using mock-local approval",
+						"user_id", req.UserID,
+						"error", err,
+					)
+				}
+				return &kyc.KYCResult{Status: "APPROVED", Tier: "TIER_1", Provider: "mock-local"}, nil
+			}
+			return nil, err
+		}
+		if s.options.AutoApproveKYC && result != nil && strings.EqualFold(result.Status, "REJECTED") {
+			if s.logger != nil {
+				s.logger.Warn(
+					"tier1 KYC provider rejected in auto-approve mode; using mock-local approval",
+					"user_id", req.UserID,
+					"reason", result.Reason,
+				)
+			}
+			return &kyc.KYCResult{Status: "APPROVED", Tier: "TIER_1", Provider: "mock-local"}, nil
+		}
+		return result, nil
 	}
 
 	if s.options.AutoApproveKYC {
@@ -283,9 +307,10 @@ func (s *ApplicationService) buildKYCStatusSummary(ctx context.Context, userID s
 	}
 
 	summary := &domain.KYCStatusSummary{
-		UserID: user.ID,
-		Status: userStatusToAPI(user.Status),
-		Tier:   user.KYCTier,
+		UserID:                 user.ID,
+		Status:                 userStatusToAPI(user.Status),
+		Tier:                   user.KYCTier,
+		TransactionPasswordSet: transactionPasswordSet(user),
 	}
 	if record == nil {
 		return summary, nil
@@ -303,9 +328,7 @@ func (s *ApplicationService) buildKYCStatusSummary(ctx context.Context, userID s
 	if record.RejectedReason != nil {
 		summary.RejectionReason = *record.RejectedReason
 	}
-	if record.Verified == nil && user.Status == string(statemachine.StateKYCApproved) && summary.Provider == "sumsub" {
-		summary.Status = "PENDING"
-	}
+
 	return summary, nil
 }
 
@@ -315,33 +338,57 @@ func (s *ApplicationService) SaveKYCResult(ctx context.Context, userID uuid.UUID
 		return err
 	}
 
+	currentTier := normalizePersistedKYCTier(user.KYCTier)
 	normalizedStatus := strings.ToUpper(strings.TrimSpace(status))
 	normalizedTier := normalizeKYCTier(tier)
-	if normalizedTier == "TIER_1" && normalizedStatus == "REJECTED" {
-		normalizedTier = "TIER_0"
-	}
+	isTierUpgrade := kycTierRank(normalizedTier) > kycTierRank(currentTier)
 
 	switch normalizedStatus {
 	case "APPROVED":
-		if user.Status == string(statemachine.StateKYCPending) {
-			if err := s.userFSM.Transition(ctx, user, statemachine.EventKYCApproved); err != nil {
-				return err
+		if normalizedTier == "TIER_1" {
+			if user.Status == string(statemachine.StateKYCPending) {
+				if err := s.userFSM.Transition(ctx, user, statemachine.EventKYCApproved); err != nil {
+					return err
+				}
+			} else {
+				user.Status = string(statemachine.StateKYCApproved)
 			}
+			user.KYCTier = normalizedTier
 		} else {
 			user.Status = string(statemachine.StateKYCApproved)
-		}
-		user.KYCTier = normalizedTier
-	case "REJECTED":
-		if user.Status == string(statemachine.StateKYCPending) {
-			if err := s.userFSM.Transition(ctx, user, statemachine.EventKYCRejected); err != nil {
-				return err
+			if isTierUpgrade {
+				user.KYCTier = normalizedTier
+			} else {
+				user.KYCTier = currentTier
 			}
-		} else {
-			user.Status = string(statemachine.StateKYCRejected)
 		}
-		user.KYCTier = normalizedTier
+	case "REJECTED":
+		if isTierUpgrade && currentTier != "TIER_0" {
+			user.Status = string(statemachine.StateKYCApproved)
+			user.KYCTier = currentTier
+		} else {
+			if normalizedTier == "TIER_1" {
+				normalizedTier = "TIER_0"
+			}
+			if user.Status == string(statemachine.StateKYCPending) {
+				if err := s.userFSM.Transition(ctx, user, statemachine.EventKYCRejected); err != nil {
+					return err
+				}
+			} else {
+				user.Status = string(statemachine.StateKYCRejected)
+			}
+			user.KYCTier = normalizedTier
+		}
 	case "PENDING":
-		user.Status = string(statemachine.StateKYCPending)
+		if isTierUpgrade && currentTier != "TIER_0" {
+			user.Status = string(statemachine.StateKYCApproved)
+			user.KYCTier = currentTier
+		} else {
+			user.Status = string(statemachine.StateKYCPending)
+			user.KYCTier = currentTier
+		}
+	default:
+		return fmt.Errorf("unsupported KYC status %s", normalizedStatus)
 	}
 
 	_, err = s.db.Exec(ctx, `

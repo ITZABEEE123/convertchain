@@ -38,6 +38,41 @@ func (c *Client) Enabled() bool {
 	return c != nil && c.appToken != "" && c.secretKey != ""
 }
 
+func (c *Client) VerifyWebhookSignature(payload []byte, digest, algorithm, secretOverride string) bool {
+	if c == nil {
+		return false
+	}
+
+	secret := strings.TrimSpace(secretOverride)
+	if secret == "" {
+		secret = c.secretKey
+	}
+	if secret == "" {
+		return false
+	}
+
+	normalizedDigest := strings.ToLower(strings.TrimSpace(digest))
+	normalizedDigest = strings.TrimPrefix(normalizedDigest, "sha256=")
+	if normalizedDigest == "" {
+		return false
+	}
+
+	normalizedAlgorithm := strings.ToUpper(strings.TrimSpace(algorithm))
+	if normalizedAlgorithm == "" {
+		normalizedAlgorithm = "HMAC_SHA256_HEX"
+	}
+
+	switch normalizedAlgorithm {
+	case "HMAC_SHA256", "HMAC_SHA256_HEX", "SHA256":
+		mac := hmac.New(sha256.New, []byte(secret))
+		mac.Write(payload)
+		expected := hex.EncodeToString(mac.Sum(nil))
+		return hmac.Equal([]byte(normalizedDigest), []byte(expected))
+	default:
+		return false
+	}
+}
+
 type ApplicantRequest struct {
 	ExternalUserID string
 	LevelName      string

@@ -14,12 +14,13 @@ type KYCSubmitRequest struct {
 }
 
 type KYCStatusResponse struct {
-	UserID          string `json:"user_id"`
-	Status          string `json:"status"`
-	KYCStatus       string `json:"kyc_status"`
-	Provider        string `json:"provider,omitempty"`
-	Tier            string `json:"tier,omitempty"`
-	SubmittedAt     string `json:"submitted_at,omitempty"`
-	CompletedAt     string `json:"completed_at,omitempty"`
-	RejectionReason string `json:"rejection_reason,omitempty"`
+	UserID                 string `json:"user_id"`
+	Status                 string `json:"status"`
+	KYCStatus              string `json:"kyc_status"`
+	Provider               string `json:"provider,omitempty"`
+	Tier                   string `json:"tier,omitempty"`
+	SubmittedAt            string `json:"submitted_at,omitempty"`
+	CompletedAt            string `json:"completed_at,omitempty"`
+	RejectionReason        string `json:"rejection_reason,omitempty"`
+	TransactionPasswordSet bool   `json:"transaction_password_set"`
 }
