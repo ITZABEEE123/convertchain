@@ -10,11 +10,18 @@ python-bot/.env.example
 go-engine/vendor/
 go-engine/tmp/
 tmp/
+*.log
+*.out.log
+*.err.log
+*.exe
 
 # Python
 python-bot/.venv/
 __pycache__/
 *.pyc
+.pytest_cache/
+.coverage
+coverage.xml
 
 # IDE
 .vscode/
