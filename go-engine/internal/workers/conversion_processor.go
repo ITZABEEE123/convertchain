@@ -100,10 +100,12 @@ func (p *ConversionProcessor) recoverInProgressTrades(ctx context.Context) {
 		}
 
 		metadata := map[string]interface{}{
-			"reason": "conversion reconciliation timed out; manual review required",
+			"reason":          "conversion reconciliation timed out; manual review required",
+			"idempotency_key": fmt.Sprintf("conversion_reconcile_timeout:%s", trade.ID.String()),
 		}
 		if trade.ExchangeOrderID != nil && strings.TrimSpace(*trade.ExchangeOrderID) != "" {
 			metadata["exchange_order_id"] = strings.TrimSpace(*trade.ExchangeOrderID)
+			metadata["idempotency_key"] = fmt.Sprintf("conversion_reconcile_timeout:%s:%s", trade.ID.String(), strings.ToLower(strings.TrimSpace(*trade.ExchangeOrderID)))
 		}
 
 		if err := p.trades.UpdateTradeStatus(ctx, trade.ID.String(), string(statemachine.TradeDispute), metadata); err != nil {
@@ -128,7 +130,8 @@ func (p *ConversionProcessor) processTrade(ctx context.Context, trade *domain.Tr
 	if err != nil {
 		if shouldEscalateConversionError(err) {
 			metadata := map[string]interface{}{
-				"reason": fmt.Sprintf("conversion requires manual review: %s", strings.TrimSpace(err.Error())),
+				"reason":          fmt.Sprintf("conversion requires manual review: %s", strings.TrimSpace(err.Error())),
+				"idempotency_key": fmt.Sprintf("conversion_escalation:%s", trade.ID.String()),
 			}
 			if updateErr := p.trades.UpdateTradeStatus(ctx, trade.ID.String(), string(statemachine.TradeDispute), metadata); updateErr != nil {
 				log.Error("conversion failed and dispute escalation also failed", "error", err, "update_error", updateErr)
@@ -143,7 +146,8 @@ func (p *ConversionProcessor) processTrade(ctx context.Context, trade *domain.Tr
 		attempt := p.incrementRetryAttempt(trade.ID.String())
 		if attempt >= conversionMaxRetryAttempts {
 			metadata := map[string]interface{}{
-				"reason": fmt.Sprintf("conversion retry limit reached after %d attempts: %s", attempt, strings.TrimSpace(err.Error())),
+				"reason":          fmt.Sprintf("conversion retry limit reached after %d attempts: %s", attempt, strings.TrimSpace(err.Error())),
+				"idempotency_key": fmt.Sprintf("conversion_retries_exhausted:%s", trade.ID.String()),
 			}
 			if updateErr := p.trades.UpdateTradeStatus(ctx, trade.ID.String(), string(statemachine.TradeDispute), metadata); updateErr != nil {
 				log.Error("conversion retry limit reached but dispute escalation failed", "attempt", attempt, "error", err, "update_error", updateErr)
@@ -164,6 +168,7 @@ func (p *ConversionProcessor) processTrade(ctx context.Context, trade *domain.Tr
 	if err := p.trades.UpdateTradeStatus(ctx, trade.ID.String(), string(statemachine.TradeConversionInProgress), map[string]interface{}{
 		"exchange_order_id": strings.TrimSpace(result.OrderID),
 		"reason":            startNote,
+		"idempotency_key":   fmt.Sprintf("conversion_started:%s:%s", trade.ID.String(), strings.ToLower(strings.TrimSpace(result.OrderID))),
 	}); err != nil {
 		log.Error("CRITICAL: exchange conversion executed but DB update failed", "order_id", result.OrderID, "error", err)
 		return
@@ -175,6 +180,7 @@ func (p *ConversionProcessor) processTrade(ctx context.Context, trade *domain.Tr
 		if err := p.trades.UpdateTradeStatus(ctx, trade.ID.String(), string(statemachine.TradeConversionCompleted), map[string]interface{}{
 			"exchange_order_id": strings.TrimSpace(result.OrderID),
 			"reason":            finishNote,
+			"idempotency_key":   fmt.Sprintf("conversion_completed:%s:%s", trade.ID.String(), strings.ToLower(strings.TrimSpace(result.OrderID))),
 		}); err != nil {
 			log.Error("failed to mark conversion completed", "order_id", result.OrderID, "error", err)
 			return
@@ -193,6 +199,7 @@ func (p *ConversionProcessor) processTrade(ctx context.Context, trade *domain.Tr
 		if err := p.trades.UpdateTradeStatus(ctx, trade.ID.String(), string(statemachine.TradeDispute), map[string]interface{}{
 			"exchange_order_id": strings.TrimSpace(result.OrderID),
 			"reason":            finishNote,
+			"idempotency_key":   fmt.Sprintf("conversion_failed_dispute:%s:%s", trade.ID.String(), strings.ToLower(strings.TrimSpace(result.OrderID))),
 		}); err != nil {
 			log.Error("failed to move failed conversion to dispute", "order_id", result.OrderID, "error", err)
 			return

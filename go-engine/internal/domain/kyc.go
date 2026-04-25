@@ -30,6 +30,9 @@ type KYCStatusSummary struct {
 	Tier                   string     `json:"tier"`
 	Provider               string     `json:"provider,omitempty"`
 	ProviderRef            string     `json:"provider_ref,omitempty"`
+	ProviderStatus         string     `json:"provider_status,omitempty"`
+	LevelName              string     `json:"level_name,omitempty"`
+	VerificationURL        string     `json:"verification_url,omitempty"`
 	SubmittedAt            *time.Time `json:"submitted_at,omitempty"`
 	CompletedAt            *time.Time `json:"completed_at,omitempty"`
 	RejectionReason        string     `json:"rejection_reason,omitempty"`
@@ -79,15 +82,17 @@ type TradeStatusHistory struct {
 
 // WebhookEvent represents an inbound webhook from an external service.
 type WebhookEvent struct {
-	ID          uuid.UUID  `json:"id" db:"id"`
-	Source      string     `json:"source" db:"source"`
-	EventType   string     `json:"event_type" db:"event_type"`
-	Payload     string     `json:"payload" db:"payload"`
-	Signature   *string    `json:"signature" db:"signature"`
-	Processed   bool       `json:"processed" db:"processed"`
-	ProcessedAt *time.Time `json:"processed_at" db:"processed_at"`
-	Error       *string    `json:"error" db:"error"`
-	CreatedAt   time.Time  `json:"created_at" db:"created_at"`
+	ID              uuid.UUID  `json:"id" db:"id"`
+	Source          string     `json:"source" db:"source"`
+	EventType       string     `json:"event_type" db:"event_type"`
+	Payload         string     `json:"payload" db:"payload"`
+	Signature       *string    `json:"signature" db:"signature"`
+	ProviderEventID *string    `json:"provider_event_id" db:"provider_event_id"`
+	PayloadSHA256   *string    `json:"payload_sha256" db:"payload_sha256"`
+	Processed       bool       `json:"processed" db:"processed"`
+	ProcessedAt     *time.Time `json:"processed_at" db:"processed_at"`
+	Error           *string    `json:"error" db:"error"`
+	CreatedAt       time.Time  `json:"created_at" db:"created_at"`
 }
 
 // NotificationEvent is a delivery outbox row produced by the Go engine and

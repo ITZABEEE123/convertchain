@@ -102,6 +102,10 @@ func (h *KYCHandler) toStatusResponse(userID string, summary *domain.KYCStatusSu
 	resp.Status = summary.Status
 	resp.KYCStatus = summary.Status
 	resp.Provider = summary.Provider
+	resp.ProviderRef = summary.ProviderRef
+	resp.ProviderStatus = summary.ProviderStatus
+	resp.LevelName = summary.LevelName
+	resp.VerificationURL = summary.VerificationURL
 	resp.Tier = summary.Tier
 	resp.TransactionPasswordSet = summary.TransactionPasswordSet
 	if summary.SubmittedAt != nil {

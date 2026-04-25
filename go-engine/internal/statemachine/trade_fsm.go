@@ -34,9 +34,9 @@ const (
 	TradeQuoteExpired  TradeState = "QUOTE_EXPIRED"  // User didn't accept in time
 
 	// Phase 2: Deposit
-	TradeCreated         TradeState = "TRADE_CREATED"     // User accepted quote
-	TradePendingDeposit  TradeState = "PENDING_DEPOSIT"   // Waiting for crypto
-	TradeDepositReceived TradeState = "DEPOSIT_RECEIVED"  // Saw tx on blockchain (unconfirmed)
+	TradeCreated          TradeState = "TRADE_CREATED"     // User accepted quote
+	TradePendingDeposit   TradeState = "PENDING_DEPOSIT"   // Waiting for crypto
+	TradeDepositReceived  TradeState = "DEPOSIT_RECEIVED"  // Saw tx on blockchain (unconfirmed)
 	TradeDepositConfirmed TradeState = "DEPOSIT_CONFIRMED" // Enough blockchain confirmations
 
 	// Phase 3: Conversion
@@ -66,19 +66,19 @@ const (
 type TradeEvent string
 
 const (
-	EventQuoteCreated      TradeEvent = "QUOTE_CREATED"       // Pricing engine created a quote
-	EventQuoteAccepted     TradeEvent = "QUOTE_ACCEPTED"      // User said "confirm"
-	EventQuoteExpired      TradeEvent = "QUOTE_EXPIRED"       // 2-minute TTL passed
-	EventDepositDetected   TradeEvent = "DEPOSIT_DETECTED"    // Blockchain tx seen (0 confirms)
-	EventDepositConfirmed  TradeEvent = "DEPOSIT_CONFIRMED"   // Required confirmations met
-	EventConversionStarted TradeEvent = "CONVERSION_STARTED"  // Exchange sell order placed
-	EventConversionDone    TradeEvent = "CONVERSION_DONE"     // Exchange order filled
-	EventPayoutInitiated   TradeEvent = "PAYOUT_INITIATED"    // Graph Finance payout started
-	EventPayoutSuccess     TradeEvent = "PAYOUT_SUCCESS"      // NIP confirmation received
-	EventPayoutFailed      TradeEvent = "PAYOUT_FAILED"       // NIP error after retries
-	EventDisputeRaised     TradeEvent = "DISPUTE_RAISED"      // User or system flags issue
-	EventDisputeResolved   TradeEvent = "DISPUTE_RESOLVED"    // Admin resolves in user's favor
-	EventCancelled         TradeEvent = "CANCELLED"           // Trade cancelled (timeout or user)
+	EventQuoteCreated      TradeEvent = "QUOTE_CREATED"      // Pricing engine created a quote
+	EventQuoteAccepted     TradeEvent = "QUOTE_ACCEPTED"     // User said "confirm"
+	EventQuoteExpired      TradeEvent = "QUOTE_EXPIRED"      // 2-minute TTL passed
+	EventDepositDetected   TradeEvent = "DEPOSIT_DETECTED"   // Blockchain tx seen (0 confirms)
+	EventDepositConfirmed  TradeEvent = "DEPOSIT_CONFIRMED"  // Required confirmations met
+	EventConversionStarted TradeEvent = "CONVERSION_STARTED" // Exchange sell order placed
+	EventConversionDone    TradeEvent = "CONVERSION_DONE"    // Exchange order filled
+	EventPayoutInitiated   TradeEvent = "PAYOUT_INITIATED"   // Graph Finance payout started
+	EventPayoutSuccess     TradeEvent = "PAYOUT_SUCCESS"     // NIP confirmation received
+	EventPayoutFailed      TradeEvent = "PAYOUT_FAILED"      // NIP error after retries
+	EventDisputeRaised     TradeEvent = "DISPUTE_RAISED"     // User or system flags issue
+	EventDisputeResolved   TradeEvent = "DISPUTE_RESOLVED"   // Admin resolves in user's favor
+	EventCancelled         TradeEvent = "CANCELLED"          // Trade cancelled (timeout or user)
 )
 
 // ──────────────────────────────────────────────
@@ -156,21 +156,19 @@ var tradeTransitions = []TradeTransition{
 		Event: EventDepositConfirmed,
 		To:    TradeDepositConfirmed,
 		Guard: func(t *domain.Trade) error {
-			// GUARD: Check minimum blockchain confirmations.
-			//
-			// Why 2 confirmations for BTC?
-			// Each confirmation means another block was mined on top of the
-			// block containing the user's transaction. More confirmations =
-			// harder to reverse. 2 confirms for BTC ≈ 20 minutes, which
-			// balances security vs. user experience.
-			//
-			// For USDC/ETH on Ethereum, 12 confirmations is standard
-			// (≈ 3 minutes with 15-second blocks).
-			if t.FromCurrency == "BTC" && t.Confirmations < 2 {
-				return fmt.Errorf("insufficient confirmations: %d/2 required", t.Confirmations)
+			required := t.RequiredConfirmations
+			if required <= 0 {
+				switch t.FromCurrency {
+				case "BTC":
+					required = 2
+				case "USDC", "ETH":
+					required = 12
+				default:
+					required = 1
+				}
 			}
-			if (t.FromCurrency == "USDC" || t.FromCurrency == "ETH") && t.Confirmations < 12 {
-				return fmt.Errorf("insufficient confirmations: %d/12 required", t.Confirmations)
+			if t.Confirmations < required {
+				return fmt.Errorf("insufficient confirmations: %d/%d required", t.Confirmations, required)
 			}
 			return nil
 		},
@@ -281,8 +279,8 @@ func NewTradeFSM() *TradeFSM {
 // Returns nil on success, or an error describing why the transition failed.
 // On success, t.Status is updated to the new state.
 // The caller is responsible for:
-//   1. Saving the updated trade to the database
-//   2. Inserting a record into trade_status_history
+//  1. Saving the updated trade to the database
+//  2. Inserting a record into trade_status_history
 func (f *TradeFSM) Transition(ctx context.Context, t *domain.Trade, event TradeEvent) error {
 	currentState := TradeState(t.Status)
 

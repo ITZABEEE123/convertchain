@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"os"
 	"strconv"
+	"strings"
 
 	"convert-chain/go-engine/internal/api/dto"
 	"convert-chain/go-engine/internal/domain"
+
 	"github.com/gin-gonic/gin"
 )
 
@@ -32,6 +35,21 @@ func NewTradeHandler(svc TradeService) *TradeHandler {
 // CreateTrade handles POST /api/v1/trades.
 // Converts an approved quote into a live trade with a deposit address.
 func (h *TradeHandler) CreateTrade(c *gin.Context) {
+	mode := legacyCreateTradeEndpointMode()
+	if mode != "allow" {
+		c.Header("Deprecation", "true")
+		c.Header("Sunset", "2026-12-31")
+		c.Header("Warning", "299 - Legacy trade creation endpoint is deprecated; migrate to /api/v1/trades/confirm")
+	}
+	if mode == "enforce" {
+		c.JSON(http.StatusGone, dto.NewError(
+			dto.ErrCodeEndpointDeprecated,
+			"POST /api/v1/trades is deprecated for payout-bound trades. Use POST /api/v1/trades/confirm with transaction_password.",
+			nil,
+		))
+		return
+	}
+
 	var req dto.CreateTradeRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, dto.NewError(dto.ErrCodeValidation, "Invalid request body", err.Error()))
@@ -46,6 +64,10 @@ func (h *TradeHandler) CreateTrade(c *gin.Context) {
 
 	trade, err := h.svc.CreateTrade(c.Request.Context(), req)
 	if err != nil {
+		var detailErr interface {
+			error
+			DetailsMap() map[string]interface{}
+		}
 		switch err.Error() {
 		case "quote_not_found":
 			c.JSON(http.StatusNotFound, dto.NewError(dto.ErrCodeNotFound, "Quote not found", nil))
@@ -53,6 +75,23 @@ func (h *TradeHandler) CreateTrade(c *gin.Context) {
 			c.JSON(http.StatusGone, dto.NewError(dto.ErrCodeQuoteExpired, "This quote has expired. Please request a new quote.", nil))
 		case "quote_already_used":
 			c.JSON(http.StatusConflict, dto.NewError(dto.ErrCodeQuoteUsed, "This quote has already been used to create a trade.", nil))
+		case "limit_exceeded":
+			if errors.As(err, &detailErr) {
+				details := detailErr.DetailsMap()
+				message := "KYC tier limit exceeded."
+				if guidance, ok := details["guidance"].(string); ok && strings.TrimSpace(guidance) != "" {
+					message = message + " " + guidance
+				}
+				c.JSON(http.StatusForbidden, dto.NewError(dto.ErrCodeLimitExceeded, message, details))
+				return
+			}
+			c.JSON(http.StatusForbidden, dto.NewError(dto.ErrCodeLimitExceeded, "KYC tier limit exceeded.", nil))
+		case "screening_blocked":
+			c.JSON(http.StatusForbidden, dto.NewError(dto.ErrCodeScreeningBlocked, "Sanctions screening blocked this transaction. Contact compliance.", nil))
+		case "screening_review_required":
+			c.JSON(http.StatusConflict, dto.NewError(dto.ErrCodeScreeningReviewRequired, "Possible sanctions/PEP match requires compliance review before trading.", nil))
+		case "compliance_review_required":
+			c.JSON(http.StatusConflict, dto.NewError(dto.ErrCodeComplianceReviewRequired, "Transaction monitoring flagged this trade for compliance review.", nil))
 		default:
 			c.JSON(http.StatusInternalServerError, dto.NewError(dto.ErrCodeInternalError, "Failed to create trade", nil))
 		}
@@ -60,6 +99,16 @@ func (h *TradeHandler) CreateTrade(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusCreated, h.tradeToResponse(c, trade))
+}
+
+func legacyCreateTradeEndpointMode() string {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv("TRADE_CREATE_ENDPOINT_MODE")))
+	switch value {
+	case "allow", "warn", "enforce":
+		return value
+	default:
+		return "warn"
+	}
 }
 
 // ConfirmTrade handles POST /api/v1/trades/confirm.
@@ -83,6 +132,10 @@ func (h *TradeHandler) ConfirmTrade(c *gin.Context) {
 			error
 			DetailsMap() map[string]interface{}
 		}
+		var detailErr interface {
+			error
+			DetailsMap() map[string]interface{}
+		}
 		switch err.Error() {
 		case "quote_not_found":
 			c.JSON(http.StatusNotFound, dto.NewError(dto.ErrCodeNotFound, "Quote not found", nil))
@@ -96,6 +149,23 @@ func (h *TradeHandler) ConfirmTrade(c *gin.Context) {
 			c.JSON(http.StatusForbidden, dto.NewError(dto.ErrCodeTxnPasswordInvalid, "The transaction password is incorrect.", nil))
 		case "transaction_password_locked":
 			c.JSON(http.StatusLocked, dto.NewError(dto.ErrCodeTxnPasswordLocked, "Transaction password is temporarily locked. Please try again later.", nil))
+		case "limit_exceeded":
+			if errors.As(err, &detailErr) {
+				details := detailErr.DetailsMap()
+				message := "KYC tier limit exceeded."
+				if guidance, ok := details["guidance"].(string); ok && strings.TrimSpace(guidance) != "" {
+					message = message + " " + guidance
+				}
+				c.JSON(http.StatusForbidden, dto.NewError(dto.ErrCodeLimitExceeded, message, details))
+				return
+			}
+			c.JSON(http.StatusForbidden, dto.NewError(dto.ErrCodeLimitExceeded, "KYC tier limit exceeded.", nil))
+		case "screening_blocked":
+			c.JSON(http.StatusForbidden, dto.NewError(dto.ErrCodeScreeningBlocked, "Sanctions screening blocked this transaction. Contact compliance.", nil))
+		case "screening_review_required":
+			c.JSON(http.StatusConflict, dto.NewError(dto.ErrCodeScreeningReviewRequired, "Possible sanctions/PEP match requires compliance review before trading.", nil))
+		case "compliance_review_required":
+			c.JSON(http.StatusConflict, dto.NewError(dto.ErrCodeComplianceReviewRequired, "Transaction monitoring flagged this trade for compliance review.", nil))
 		default:
 			if errors.As(err, &tradePreflightErr) {
 				c.JSON(http.StatusConflict, dto.NewError(dto.ErrCodeTradePreflightFailed, tradePreflightErr.Error(), tradePreflightErr.DetailsMap()))

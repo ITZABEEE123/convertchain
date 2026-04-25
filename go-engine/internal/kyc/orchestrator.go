@@ -39,12 +39,37 @@ func (o *KYCOrchestrator) SupportsTier2() bool {
 	return o != nil && o.sumsub != nil && o.sumsub.Enabled()
 }
 
+func (o *KYCOrchestrator) SupportsSumsub() bool {
+	return o != nil && o.sumsub != nil && o.sumsub.Enabled()
+}
+
+func (o *KYCOrchestrator) SumsubSandbox() bool {
+	return o != nil && o.sumsub != nil && o.sumsub.IsSandbox()
+}
+
 func (o *KYCOrchestrator) VerifySmileIDCallback(signature, timestamp string) bool {
 	return o != nil && o.smileID != nil && o.smileID.VerifyCallbackSignature(signature, timestamp)
 }
 
 func (o *KYCOrchestrator) VerifySumsubWebhook(payload []byte, digest, algorithm, webhookSecret string) bool {
 	return o != nil && o.sumsub != nil && o.sumsub.VerifyWebhookSignature(payload, digest, algorithm, webhookSecret)
+}
+
+func (o *KYCOrchestrator) CreateSumsubVerificationLink(ctx context.Context, userID, levelName, email, phone string, ttlInSecs int) (string, error) {
+	if !o.SupportsSumsub() {
+		return "", fmt.Errorf("sumsub_not_configured")
+	}
+	link, err := o.sumsub.CreateWebSDKLink(ctx, sumsub.WebSDKLinkRequest{
+		UserID:      userID,
+		LevelName:   levelName,
+		Email:       email,
+		PhoneNumber: phone,
+		TTLInSecs:   ttlInSecs,
+	})
+	if err != nil {
+		return "", err
+	}
+	return link.URL, nil
 }
 
 func (o *KYCOrchestrator) SubmitTier1KYC(ctx context.Context, req Tier1KYCRequest) (*KYCResult, error) {
@@ -158,7 +183,7 @@ func firstNonEmptyReason(values ...string) string {
 }
 
 func (o *KYCOrchestrator) SubmitTier2KYC(ctx context.Context, req Tier2KYCRequest) (*KYCResult, error) {
-	if !o.SupportsTier2() {
+	if !o.SupportsSumsub() {
 		return nil, fmt.Errorf("sumsub_not_configured")
 	}
 
@@ -180,9 +205,35 @@ func (o *KYCOrchestrator) SubmitTier2KYC(ctx context.Context, req Tier2KYCReques
 		targetTier = "TIER_2"
 	}
 
+	return o.SubmitSumsubKYC(ctx, SumsubKYCRequest{
+		UserID:      req.UserID,
+		TargetTier:  targetTier,
+		LevelName:   req.LevelName,
+		FirstName:   req.FirstName,
+		LastName:    req.LastName,
+		DateOfBirth: req.DateOfBirth,
+		Email:       req.Email,
+		PhoneNumber: req.PhoneNumber,
+	})
+}
+
+func (o *KYCOrchestrator) SubmitSumsubKYC(ctx context.Context, req SumsubKYCRequest) (*KYCResult, error) {
+	if !o.SupportsSumsub() {
+		return nil, fmt.Errorf("sumsub_not_configured")
+	}
+
+	targetTier := strings.TrimSpace(strings.ToUpper(req.TargetTier))
+	if targetTier == "" {
+		targetTier = "TIER_1"
+	}
+	levelName := strings.TrimSpace(req.LevelName)
+	if levelName == "" {
+		levelName = "telegram-tier1"
+	}
+
 	applicant, err := o.sumsub.CreateApplicant(ctx, sumsub.ApplicantRequest{
 		ExternalUserID: req.UserID.String(),
-		LevelName:      req.LevelName,
+		LevelName:      levelName,
 		FirstName:      req.FirstName,
 		LastName:       req.LastName,
 		DateOfBirth:    req.DateOfBirth,
@@ -193,10 +244,24 @@ func (o *KYCOrchestrator) SubmitTier2KYC(ctx context.Context, req Tier2KYCReques
 		return nil, fmt.Errorf("create sumsub applicant failed: %w", err)
 	}
 
+	link, err := o.sumsub.CreateWebSDKLink(ctx, sumsub.WebSDKLinkRequest{
+		UserID:      req.UserID.String(),
+		LevelName:   levelName,
+		Email:       req.Email,
+		PhoneNumber: req.PhoneNumber,
+		TTLInSecs:   req.TTLInSecs,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create sumsub websdk link failed: %w", err)
+	}
+
 	return &KYCResult{
-		Status:      "PENDING",
-		Tier:        targetTier,
-		Provider:    "sumsub",
-		ProviderRef: applicant.ID,
+		Status:          "PENDING",
+		Tier:            targetTier,
+		Provider:        "sumsub",
+		ProviderRef:     applicant.ID,
+		ProviderStatus:  applicant.ReviewStatus,
+		LevelName:       levelName,
+		VerificationURL: link.URL,
 	}, nil
 }

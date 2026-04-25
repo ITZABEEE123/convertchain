@@ -18,6 +18,10 @@ type KYCStatusResponse struct {
 	Status                 string `json:"status"`
 	KYCStatus              string `json:"kyc_status"`
 	Provider               string `json:"provider,omitempty"`
+	ProviderRef            string `json:"provider_ref,omitempty"`
+	ProviderStatus         string `json:"provider_status,omitempty"`
+	LevelName              string `json:"level_name,omitempty"`
+	VerificationURL        string `json:"verification_url,omitempty"`
 	Tier                   string `json:"tier,omitempty"`
 	SubmittedAt            string `json:"submitted_at,omitempty"`
 	CompletedAt            string `json:"completed_at,omitempty"`

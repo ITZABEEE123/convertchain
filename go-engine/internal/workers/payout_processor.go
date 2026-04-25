@@ -98,7 +98,8 @@ func (p *PayoutProcessor) initiateReadyPayouts(ctx context.Context) {
 		if err != nil {
 			if shouldFailPayoutPermanently(err) {
 				if updateErr := p.trades.UpdateTradeStatus(ctx, trade.ID.String(), string(statemachine.TradePayoutFailed), map[string]interface{}{
-					"reason": "non-retryable payout initiation error: " + strings.TrimSpace(err.Error()),
+					"reason":          "non-retryable payout initiation error: " + strings.TrimSpace(err.Error()),
+					"idempotency_key": "payout_failed_initiation:" + trade.ID.String(),
 				}); updateErr != nil {
 					log.Error("failed to mark payout as failed after non-retryable initiation error", "error", err, "update_error", updateErr)
 					continue
@@ -112,8 +113,9 @@ func (p *PayoutProcessor) initiateReadyPayouts(ctx context.Context) {
 		}
 
 		if err := p.trades.UpdateTradeStatus(ctx, trade.ID.String(), string(statemachine.TradePayoutPending), map[string]interface{}{
-			"payout_ref": payoutRef,
-			"reason":     "graph payout initiated",
+			"payout_ref":      payoutRef,
+			"reason":          "graph payout initiated",
+			"idempotency_key": "payout_pending:" + trade.ID.String() + ":" + strings.ToLower(strings.TrimSpace(payoutRef)),
 		}); err != nil {
 			log.Error("CRITICAL: payout was initiated but DB update failed", "payout_ref", payoutRef, "error", err)
 			continue
@@ -156,8 +158,9 @@ func (p *PayoutProcessor) reconcilePendingPayouts(ctx context.Context) {
 			p.logger.Info("payout completed successfully", "trade_id", trade.ID.String(), "payout_ref", payoutRef)
 		case "failed":
 			if err := p.trades.UpdateTradeStatus(ctx, trade.ID.String(), string(statemachine.TradePayoutFailed), map[string]interface{}{
-				"payout_ref": payoutRef,
-				"reason":     "graph payout failed with status " + status,
+				"payout_ref":      payoutRef,
+				"reason":          "graph payout failed with status " + status,
+				"idempotency_key": "payout_failed:" + trade.ID.String() + ":" + strings.ToLower(strings.TrimSpace(payoutRef)),
 			}); err != nil {
 				p.logger.Error("failed to mark payout failed", "trade_id", trade.ID.String(), "payout_ref", payoutRef, "error", err)
 				continue

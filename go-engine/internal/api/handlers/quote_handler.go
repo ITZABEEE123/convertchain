@@ -2,11 +2,14 @@ package handlers
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"convert-chain/go-engine/internal/api/dto"
 	"convert-chain/go-engine/internal/domain"
+
 	"github.com/gin-gonic/gin"
 )
 
@@ -49,7 +52,31 @@ func (h *QuoteHandler) CreateQuote(c *gin.Context) {
 
 	quote, err := h.svc.CreateQuote(c.Request.Context(), req)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, dto.NewError(dto.ErrCodeInternalError, "Failed to generate quote", nil))
+		var detailErr interface {
+			error
+			DetailsMap() map[string]interface{}
+		}
+		switch err.Error() {
+		case "limit_exceeded":
+			if errors.As(err, &detailErr) {
+				details := detailErr.DetailsMap()
+				message := "KYC tier limit exceeded. "
+				if guidance, ok := details["guidance"].(string); ok && strings.TrimSpace(guidance) != "" {
+					message += guidance
+				}
+				c.JSON(http.StatusForbidden, dto.NewError(dto.ErrCodeLimitExceeded, message, details))
+				return
+			}
+			c.JSON(http.StatusForbidden, dto.NewError(dto.ErrCodeLimitExceeded, "KYC tier limit exceeded.", nil))
+		case "screening_blocked":
+			c.JSON(http.StatusForbidden, dto.NewError(dto.ErrCodeScreeningBlocked, "Sanctions screening blocked this transaction. Contact compliance.", map[string]interface{}{"reason": err.Error()}))
+		case "screening_review_required":
+			c.JSON(http.StatusConflict, dto.NewError(dto.ErrCodeScreeningReviewRequired, "Possible sanctions/PEP match requires compliance review before trading.", map[string]interface{}{"reason": err.Error()}))
+		case "compliance_review_required":
+			c.JSON(http.StatusConflict, dto.NewError(dto.ErrCodeComplianceReviewRequired, "Transaction monitoring flagged this request for compliance review.", map[string]interface{}{"reason": err.Error()}))
+		default:
+			c.JSON(http.StatusInternalServerError, dto.NewError(dto.ErrCodeInternalError, "Failed to generate quote", nil))
+		}
 		return
 	}
 

@@ -264,6 +264,52 @@ async def test_collect_bvn_returns_immediate_rejection_reason(
 
 
 @pytest.mark.asyncio
+async def test_collect_bvn_starts_sumsub_link_flow(
+    onboarding_flow,
+    mock_session_service,
+    mock_engine_client,
+):
+    mock_engine_client.submit_kyc = AsyncMock(
+        return_value={
+            "kyc_id": "kyc_test456",
+            "status": "PENDING",
+            "provider": "sumsub",
+            "provider_ref": "applicant-123",
+            "verification_url": "https://api.sumsub.com/websdk/p/test-link",
+        }
+    )
+
+    await mock_session_service.set("+2348012345678", {
+        "flow": "onboarding",
+        "step": "COLLECT_BVN",
+        "engine_user_id": "usr_test123",
+        "channel": "telegram",
+        "data": {
+            "phone": "+2348012345678",
+            "first_name": "John",
+            "last_name": "Doe",
+            "date_of_birth": "1990-01-15",
+            "nin": "12345678901",
+        },
+    })
+
+    session = await mock_session_service.get("+2348012345678")
+    result = await onboarding_flow.handle_step(
+        user_id="+2348012345678",
+        session=session,
+        text="22345678901",
+        image_id=None,
+    )
+
+    updated_session = await mock_session_service.get("+2348012345678")
+    assert updated_session["step"] == STEP_KYC_SUBMITTED
+    assert updated_session["data"]["kyc_provider"] == "sumsub"
+    assert updated_session["data"]["sumsub_applicant_id"] == "applicant-123"
+    assert "sumsub" in result.lower()
+    assert "https://api.sumsub.com/websdk/p/test-link" in result
+
+
+@pytest.mark.asyncio
 async def test_confirm_transaction_password_reports_final_setup_step(
     onboarding_flow,
     mock_session_service,

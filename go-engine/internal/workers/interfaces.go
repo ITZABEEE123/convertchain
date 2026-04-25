@@ -19,6 +19,10 @@ type TradeRepository interface {
 	// GetTradeByID fetches a single trade by its UUID.
 	GetTradeByID(ctx context.Context, tradeID string) (*domain.Trade, error)
 
+	// GetTradeByDepositTxHash returns a trade that already recorded this
+	// blockchain transaction hash, if any.
+	GetTradeByDepositTxHash(ctx context.Context, txHash string) (*domain.Trade, error)
+
 	// UpdateTradeStatus persists a new status + optional metadata to the database.
 	// metadata is a free-form map that is translated into the relevant trade fields.
 	UpdateTradeStatus(ctx context.Context, tradeID string, status string, metadata map[string]interface{}) error
@@ -66,6 +70,21 @@ type DepositResult struct {
 
 	// TxHash is the blockchain transaction hash, used for audit trails.
 	TxHash string
+
+	// Network is the normalized chain/network where this transaction was seen.
+	Network string
+
+	// Address is the matched destination address observed on chain.
+	Address string
+
+	// ReorgRisk indicates the tx is seen but not yet final on its chain.
+	ReorgRisk bool
+
+	// Reversed indicates the tx was removed/reversed (for example chain reorg).
+	Reversed bool
+
+	// Replaced indicates replacement-by-fee or equivalent replacement risk.
+	Replaced bool
 }
 
 // ConversionExecutor defines the exchange-side conversion operations.

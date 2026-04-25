@@ -103,3 +103,51 @@ async def test_telegram_direct_parse_callback_query():
         assert envelopes[0].text == "CONFIRM"
     finally:
         await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_telegram_direct_requires_secret_when_configured():
+    provider = TelegramDirectProvider(bot_token="test-token", webhook_secret="telegram-secret")
+    try:
+        assert await provider.verify_request(
+            {"x-telegram-bot-api-secret-token": "telegram-secret"},
+            b"{}",
+        ) is True
+        assert await provider.verify_request(
+            {"x-telegram-bot-api-secret-token": "wrong-secret"},
+            b"{}",
+        ) is False
+        assert await provider.verify_request({}, b"{}") is False
+    finally:
+        await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_telegram_direct_allows_explicit_trusted_delivery_without_secret():
+    provider = TelegramDirectProvider(bot_token="test-token", trusted_delivery=True)
+    try:
+        assert await provider.verify_request({}, b"{}") is True
+    finally:
+        await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_telegram_direct_scopes_message_ids_by_chat():
+    provider = TelegramDirectProvider(bot_token="test-token")
+    try:
+        payload = {
+            "update_id": 1,
+            "message": {
+                "message_id": 7,
+                "date": 1710000000,
+                "chat": {"id": 99887766},
+                "from": {"first_name": "Tobi"},
+                "text": "hi",
+            },
+        }
+
+        envelopes = provider.parse_inbound(payload, signature_valid=True)
+        assert len(envelopes) == 1
+        assert envelopes[0].message_id == "99887766:7"
+    finally:
+        await provider.close()

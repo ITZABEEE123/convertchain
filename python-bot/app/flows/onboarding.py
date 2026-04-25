@@ -525,6 +525,30 @@ class OnboardingFlow:
                 "Please check your NIN, BVN, name, and date of birth, then type *hi* to try again."
             )
 
+        verification_url = (
+            kyc_result.get("verification_url")
+            or kyc_result.get("applicant_verification_url")
+            or kyc_result.get("websdk_url")
+        )
+        provider = str(kyc_result.get("provider") or "").lower()
+        if provider == "sumsub" and verification_url:
+            session["step"] = STEP_KYC_SUBMITTED
+            session["data"]["kyc_id"] = kyc_id
+            session["data"]["kyc_provider"] = "sumsub"
+            session["data"]["sumsub_verification_url"] = verification_url
+            if kyc_result.get("provider_ref"):
+                session["data"]["sumsub_applicant_id"] = kyc_result["provider_ref"]
+            await self._session.set(user_id, session)
+
+            return (
+                "BVN submitted. Your identity check is ready.\n\n"
+                "*Step 7 of 9 - Sumsub Verification*\n\n"
+                "Open this secure Sumsub link and complete the verification steps:\n"
+                f"{verification_url}\n\n"
+                "When you finish, return here and type *status*.\n\n"
+                "If the link expires, type *status* and I will request a fresh link."
+            )
+
         session["step"] = STEP_UPLOAD_SELFIE
         session["data"]["kyc_id"] = kyc_id
         await self._session.set(user_id, session)
@@ -629,6 +653,24 @@ class OnboardingFlow:
 
         else:
             # Still pending
+            verification_url = (
+                kyc_status_result.get("verification_url")
+                or session.get("data", {}).get("sumsub_verification_url")
+            )
+            provider = str(
+                kyc_status_result.get("provider")
+                or session.get("data", {}).get("kyc_provider")
+                or ""
+            ).lower()
+            if provider == "sumsub" and verification_url:
+                session.setdefault("data", {})["sumsub_verification_url"] = verification_url
+                await self._session.set(user_id, session)
+                return (
+                    "Your Sumsub verification is still pending.\n\n"
+                    "Open this secure link to continue or resume verification:\n"
+                    f"{verification_url}\n\n"
+                    "When you finish, return here and type *status*."
+                )
             return (
                 "⏳ *Verification still in progress.*\n\n"
                 "Your identity is being verified against government databases. "

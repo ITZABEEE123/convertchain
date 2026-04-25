@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -66,6 +67,11 @@ func main() {
 	redisURL := firstNonEmpty(strings.TrimSpace(os.Getenv("REDIS_URL")), "redis://:DevPassword123!@127.0.0.1:6379/0")
 	vaultAddr := firstNonEmpty(strings.TrimSpace(os.Getenv("VAULT_ADDR")), "http://127.0.0.1:8200")
 	vaultToken := strings.TrimSpace(os.Getenv("VAULT_TOKEN"))
+
+	if keyName := detectedPrivateKeyEnv(); keyName != "" {
+		logger.Error("private key material must not be loaded from environment", "env", keyName)
+		os.Exit(1)
+	}
 
 	binanceCreds := map[string]string{}
 	bybitCreds := map[string]string{}
@@ -154,13 +160,22 @@ func main() {
 		envBool("GRAPH_USE_SANDBOX", true),
 	)
 
+	sumsubUseSandbox := envBool("SUMSUB_USE_SANDBOX", environment != "production")
+	if environment == "production" && sumsubUseSandbox {
+		logger.Error("SUMSUB_USE_SANDBOX must be false in production")
+		os.Exit(1)
+	}
+
 	smileIDPartnerID := firstNonEmpty(strings.TrimSpace(os.Getenv("SMILE_ID_PARTNER_ID")), smileIDCreds["partner_id"])
 	smileIDAPIKey := firstNonEmpty(strings.TrimSpace(os.Getenv("SMILE_ID_API_KEY")), smileIDCreds["api_key"])
 	sumsubAppToken := firstNonEmpty(strings.TrimSpace(os.Getenv("SUMSUB_APP_TOKEN")), sumsubCreds["app_token"])
 	sumsubSecretKey := firstNonEmpty(strings.TrimSpace(os.Getenv("SUMSUB_SECRET_KEY")), sumsubCreds["secret_key"])
 	sumsubWebhookSecret := firstNonEmpty(strings.TrimSpace(os.Getenv("SUMSUB_WEBHOOK_SECRET")), sumsubCreds["webhook_secret"], sumsubSecretKey)
+	sumsubWebhookPublicBaseURL := firstNonEmpty(strings.TrimSpace(os.Getenv("SUMSUB_WEBHOOK_PUBLIC_BASE_URL")), sumsubCreds["webhook_public_base_url"])
 	graphWebhookSecret := firstNonEmpty(strings.TrimSpace(os.Getenv("GRAPH_WEBHOOK_SECRET")), graphCreds["webhook_secret"])
 	graphWebhookPublicBaseURL := firstNonEmpty(strings.TrimSpace(os.Getenv("GRAPH_WEBHOOK_PUBLIC_BASE_URL")), graphCreds["webhook_public_base_url"])
+	kycPrimaryProvider := normalizeKYCPrimaryProvider(firstNonEmpty(strings.TrimSpace(os.Getenv("KYC_PRIMARY_PROVIDER")), defaultKYCPrimaryProvider(sumsubAppToken, sumsubSecretKey)))
+	sumsubWebSDKLinkTTLSeconds := envInt("SUMSUB_WEBSDK_LINK_TTL_SECONDS", 1800)
 	autoApproveKYC := envBool("AUTO_APPROVE_KYC", environment != "production")
 	if environment == "production" && autoApproveKYC {
 		logger.Warn("AUTO_APPROVE_KYC requested in production; forcing disabled")
@@ -181,13 +196,22 @@ func main() {
 		encryptor,
 		logger,
 		service.Options{
-			AutoApproveKYC:            autoApproveKYC,
-			SmileIDPartnerID:          smileIDPartnerID,
-			SmileIDAPIKey:             smileIDAPIKey,
-			SumsubWebhookSecret:       sumsubWebhookSecret,
-			GraphWebhookSecret:        graphWebhookSecret,
-			GraphWebhookPublicBaseURL: graphWebhookPublicBaseURL,
-			BybitFallbackEnabled:      bybitFallbackEnabled,
+			AutoApproveKYC:             autoApproveKYC,
+			Environment:                environment,
+			KYCPrimaryProvider:         kycPrimaryProvider,
+			SmileIDPartnerID:           smileIDPartnerID,
+			SmileIDAPIKey:              smileIDAPIKey,
+			SumsubWebhookSecret:        sumsubWebhookSecret,
+			SumsubWebhookPublicBaseURL: sumsubWebhookPublicBaseURL,
+			SumsubUseSandbox:           sumsubUseSandbox,
+			SumsubTier1LevelName:       firstNonEmpty(strings.TrimSpace(os.Getenv("SUMSUB_TIER1_LEVEL_NAME")), "telegram-tier1"),
+			SumsubTier2LevelName:       firstNonEmpty(strings.TrimSpace(os.Getenv("SUMSUB_TIER2_LEVEL_NAME")), "telegram-tier2"),
+			SumsubTier3LevelName:       firstNonEmpty(strings.TrimSpace(os.Getenv("SUMSUB_TIER3_LEVEL_NAME")), "telegram-tier3"),
+			SumsubTier4LevelName:       firstNonEmpty(strings.TrimSpace(os.Getenv("SUMSUB_TIER4_LEVEL_NAME")), "telegram-tier4"),
+			SumsubWebSDKLinkTTLSeconds: sumsubWebSDKLinkTTLSeconds,
+			GraphWebhookSecret:         graphWebhookSecret,
+			GraphWebhookPublicBaseURL:  graphWebhookPublicBaseURL,
+			BybitFallbackEnabled:       bybitFallbackEnabled,
 		},
 	)
 
@@ -200,7 +224,7 @@ func main() {
 
 	var sumsubClient *sumsubclient.Client
 	if sumsubAppToken != "" && sumsubSecretKey != "" {
-		sumsubClient = sumsubclient.NewClient(sumsubAppToken, sumsubSecretKey, envBool("SUMSUB_USE_SANDBOX", true))
+		sumsubClient = sumsubclient.NewClient(sumsubAppToken, sumsubSecretKey, sumsubUseSandbox)
 	} else if sumsubAppToken != "" || sumsubSecretKey != "" {
 		logger.Warn("sumsub credentials incomplete; advanced KYC provider disabled")
 	}
@@ -213,11 +237,21 @@ func main() {
 	workerCtx, workerCancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer workerCancel()
 
-	depositWatcher := workers.NewDepositWatcher(
+	depositPolicies := workers.NewDepositPolicySetFromEnv()
+	blockchainClient := service.NewBlockchainClientFromEnv(logger)
+	depositWatcher := workers.NewDepositWatcherWithPolicy(
 		appService,
-		service.NewSandboxBlockchainClient(),
+		blockchainClient,
 		statemachine.NewTradeFSM(),
+		depositPolicies,
 		5*time.Second,
+		logger,
+	)
+	depositBackfill := workers.NewDepositBackfillScanner(
+		appService,
+		blockchainClient,
+		depositPolicies,
+		30*time.Second,
 		logger,
 	)
 	quoteExpiry := workers.NewQuoteExpiryWorker(appService, 15*time.Second, logger)
@@ -235,6 +269,7 @@ func main() {
 	)
 
 	go depositWatcher.Run(workerCtx)
+	go depositBackfill.Run(workerCtx)
 	go quoteExpiry.Run(workerCtx)
 	go conversionProcessor.Run(workerCtx)
 	go payoutProcessor.Run(workerCtx)
@@ -276,10 +311,15 @@ func main() {
 		"addr", ":9000",
 		"environment", environment,
 		"auto_approve_kyc", autoApproveKYC,
+		"trade_create_endpoint_mode", strings.ToLower(strings.TrimSpace(os.Getenv("TRADE_CREATE_ENDPOINT_MODE"))),
+		"graph_webhook_event_id_mode", strings.ToLower(strings.TrimSpace(os.Getenv("GRAPH_WEBHOOK_EVENT_ID_MODE"))),
 		"graph_sandbox", graphClient.IsSandbox(),
 		"graph_webhook_secret_configured", graphWebhookSecret != "",
+		"kyc_primary_provider", kycPrimaryProvider,
 		"smile_id_configured", smileIDClient != nil,
 		"sumsub_configured", sumsubClient != nil,
+		"sumsub_sandbox", sumsubUseSandbox,
+		"sumsub_webhook_secret_configured", sumsubWebhookSecret != "",
 		"bybit_fallback_enabled", bybitFallbackEnabled,
 	)
 
@@ -287,6 +327,21 @@ func main() {
 		logger.Error("server stopped unexpectedly", "error", err)
 		os.Exit(1)
 	}
+}
+
+func detectedPrivateKeyEnv() string {
+	for _, key := range []string{
+		"BTC_PRIVATE_KEY",
+		"ETH_PRIVATE_KEY",
+		"USDC_PRIVATE_KEY",
+		"WALLET_PRIVATE_KEY",
+		"SECP256K1_PRIVATE_KEY",
+	} {
+		if strings.TrimSpace(os.Getenv(key)) != "" {
+			return key
+		}
+	}
+	return ""
 }
 
 func optionalSecret(ctx context.Context, vault *vaultclient.Client, path, field string, logger *slog.Logger) string {
@@ -329,5 +384,35 @@ func envBool(key string, fallback bool) bool {
 		return false
 	default:
 		return fallback
+	}
+}
+
+func envInt(key string, fallback int) int {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func defaultKYCPrimaryProvider(sumsubAppToken, sumsubSecretKey string) string {
+	if strings.TrimSpace(sumsubAppToken) != "" && strings.TrimSpace(sumsubSecretKey) != "" {
+		return "sumsub"
+	}
+	return "smile_id"
+}
+
+func normalizeKYCPrimaryProvider(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "sumsub":
+		return "sumsub"
+	case "smileid", "smile_id", "smile-id":
+		return "smile_id"
+	default:
+		return "smile_id"
 	}
 }

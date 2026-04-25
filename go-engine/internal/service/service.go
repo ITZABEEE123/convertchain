@@ -15,9 +15,18 @@ import (
 
 type Options struct {
 	AutoApproveKYC           bool
+	Environment              string
+	KYCPrimaryProvider       string
 	SmileIDPartnerID         string
 	SmileIDAPIKey            string
 	SumsubWebhookSecret      string
+	SumsubWebhookPublicBaseURL string
+	SumsubUseSandbox         bool
+	SumsubTier1LevelName     string
+	SumsubTier2LevelName     string
+	SumsubTier3LevelName     string
+	SumsubTier4LevelName     string
+	SumsubWebSDKLinkTTLSeconds int
 	GraphWebhookSecret       string
 	GraphWebhookPublicBaseURL string
 	BybitFallbackEnabled     bool

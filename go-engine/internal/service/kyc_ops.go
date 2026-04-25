@@ -72,7 +72,12 @@ func (s *ApplicationService) submitTier1KYC(ctx context.Context, user *domain.Us
 		return nil, err
 	}
 
-	return s.buildKYCStatusSummary(ctx, req.UserID)
+	summary, err := s.buildKYCStatusSummary(ctx, req.UserID)
+	if err != nil {
+		return nil, err
+	}
+	mergeKYCResultMetadata(summary, result)
+	return summary, nil
 }
 
 func (s *ApplicationService) submitTier2PlusKYC(ctx context.Context, user *domain.User, req dto.KYCSubmitRequest, tier string) (*domain.KYCStatusSummary, error) {
@@ -87,7 +92,7 @@ func (s *ApplicationService) submitTier2PlusKYC(ctx context.Context, user *domai
 	result, err := s.kycOrchestrator.SubmitTier2KYC(ctx, kyc.Tier2KYCRequest{
 		UserID:               user.ID,
 		TargetTier:           tier,
-		LevelName:            sumsubLevelNameForTier(tier),
+		LevelName:            s.sumsubLevelNameForTier(tier),
 		FirstName:            req.FirstName,
 		LastName:             req.LastName,
 		DateOfBirth:          req.DateOfBirth,
@@ -104,17 +109,35 @@ func (s *ApplicationService) submitTier2PlusKYC(ctx context.Context, user *domai
 	}
 
 	return &domain.KYCStatusSummary{
-		UserID:      user.ID,
-		Status:      strings.ToUpper(strings.TrimSpace(result.Status)),
-		Tier:        tier,
-		Provider:    result.Provider,
-		ProviderRef: result.ProviderRef,
-		SubmittedAt: timePointer(time.Now().UTC()),
-		CompletedAt: nil,
+		UserID:          user.ID,
+		Status:          strings.ToUpper(strings.TrimSpace(result.Status)),
+		Tier:            tier,
+		Provider:        result.Provider,
+		ProviderRef:     result.ProviderRef,
+		ProviderStatus:  result.ProviderStatus,
+		LevelName:       result.LevelName,
+		VerificationURL: result.VerificationURL,
+		SubmittedAt:     timePointer(time.Now().UTC()),
+		CompletedAt:     nil,
 	}, nil
 }
 
 func (s *ApplicationService) runTier1Provider(ctx context.Context, req dto.KYCSubmitRequest, phone string) (*kyc.KYCResult, error) {
+	switch normalizeKYCProvider(s.options.KYCPrimaryProvider) {
+	case "sumsub":
+		if s.kycOrchestrator != nil && s.kycOrchestrator.SupportsSumsub() {
+			return s.submitSumsubTierKYC(ctx, req, phone, "TIER_1")
+		}
+		if s.options.AutoApproveKYC {
+			return &kyc.KYCResult{Status: "APPROVED", Tier: "TIER_1", Provider: "mock-local"}, nil
+		}
+		return nil, errors.New("kyc_provider_not_configured")
+	default:
+		return s.runSmileIDTier1Provider(ctx, req, phone)
+	}
+}
+
+func (s *ApplicationService) runSmileIDTier1Provider(ctx context.Context, req dto.KYCSubmitRequest, phone string) (*kyc.KYCResult, error) {
 	if s.kycOrchestrator != nil && s.kycOrchestrator.SupportsTier1() {
 		result, err := s.kycOrchestrator.SubmitTier1KYC(ctx, kyc.Tier1KYCRequest{
 			UserID:      uuid.MustParse(req.UserID),
@@ -156,6 +179,34 @@ func (s *ApplicationService) runTier1Provider(ctx context.Context, req dto.KYCSu
 	}
 
 	return nil, errors.New("kyc_provider_not_configured")
+}
+
+func (s *ApplicationService) submitSumsubTierKYC(ctx context.Context, req dto.KYCSubmitRequest, phone, tier string) (*kyc.KYCResult, error) {
+	result, err := s.kycOrchestrator.SubmitSumsubKYC(ctx, kyc.SumsubKYCRequest{
+		UserID:      uuid.MustParse(req.UserID),
+		TargetTier:  tier,
+		LevelName:   s.sumsubLevelNameForTier(tier),
+		FirstName:   req.FirstName,
+		LastName:    req.LastName,
+		DateOfBirth: req.DateOfBirth,
+		PhoneNumber: phone,
+		TTLInSecs:   s.options.SumsubWebSDKLinkTTLSeconds,
+	})
+	if err != nil {
+		if s.options.AutoApproveKYC {
+			if s.logger != nil {
+				s.logger.Warn(
+					"sumsub tier KYC failed in auto-approve mode; using mock-local approval",
+					"user_id", req.UserID,
+					"tier", tier,
+					"error", err,
+				)
+			}
+			return &kyc.KYCResult{Status: "APPROVED", Tier: tier, Provider: "mock-local"}, nil
+		}
+		return nil, err
+	}
+	return result, nil
 }
 
 func transitionUserToTier1Pending(ctx context.Context, fsm *statemachine.UserFSM, user *domain.User) error {
@@ -328,6 +379,23 @@ func (s *ApplicationService) buildKYCStatusSummary(ctx context.Context, userID s
 	if record.RejectedReason != nil {
 		summary.RejectionReason = *record.RejectedReason
 	}
+	if summary.Provider == "sumsub" && strings.EqualFold(summary.Status, "PENDING") {
+		summary.LevelName = s.sumsubLevelNameForTier(summary.Tier)
+		if s.kycOrchestrator != nil && s.kycOrchestrator.SupportsSumsub() {
+			if link, err := s.kycOrchestrator.CreateSumsubVerificationLink(
+				ctx,
+				user.ID.String(),
+				summary.LevelName,
+				user.Email,
+				user.PhoneNumber,
+				s.options.SumsubWebSDKLinkTTLSeconds,
+			); err == nil {
+				summary.VerificationURL = link
+			} else if s.logger != nil {
+				s.logger.Warn("failed to regenerate sumsub verification link", "user_id", user.ID.String(), "error", err)
+			}
+		}
+	}
 
 	return summary, nil
 }
@@ -424,15 +492,54 @@ func normalizeKYCTier(raw string) string {
 	}
 }
 
-func sumsubLevelNameForTier(tier string) string {
+func (s *ApplicationService) sumsubLevelNameForTier(tier string) string {
 	switch normalizeKYCTier(tier) {
+	case "TIER_1":
+		return firstNonEmptyLocal(s.options.SumsubTier1LevelName, "telegram-tier1")
+	case "TIER_2":
+		return firstNonEmptyLocal(s.options.SumsubTier2LevelName, "telegram-tier2")
 	case "TIER_3":
-		return "telegram-tier3"
+		return firstNonEmptyLocal(s.options.SumsubTier3LevelName, "telegram-tier3")
 	case "TIER_4":
-		return "telegram-tier4"
+		return firstNonEmptyLocal(s.options.SumsubTier4LevelName, "telegram-tier4")
 	default:
-		return "telegram-tier2"
+		return firstNonEmptyLocal(s.options.SumsubTier1LevelName, "telegram-tier1")
 	}
+}
+
+func normalizeKYCProvider(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "sumsub":
+		return "sumsub"
+	case "smileid", "smile_id", "smile-id":
+		return "smile_id"
+	default:
+		return "smile_id"
+	}
+}
+
+func mergeKYCResultMetadata(summary *domain.KYCStatusSummary, result *kyc.KYCResult) {
+	if summary == nil || result == nil {
+		return
+	}
+	if strings.TrimSpace(result.ProviderStatus) != "" {
+		summary.ProviderStatus = result.ProviderStatus
+	}
+	if strings.TrimSpace(result.LevelName) != "" {
+		summary.LevelName = result.LevelName
+	}
+	if strings.TrimSpace(result.VerificationURL) != "" {
+		summary.VerificationURL = result.VerificationURL
+	}
+}
+
+func firstNonEmptyLocal(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func kycOutcomeFields(result *kyc.KYCResult) (*bool, *time.Time, string) {

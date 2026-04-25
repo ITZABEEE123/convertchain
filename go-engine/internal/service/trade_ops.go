@@ -39,6 +39,16 @@ func (s *ApplicationService) CreateQuote(ctx context.Context, req dto.QuoteReque
 		return nil, err
 	}
 
+	if err := s.enforceQuoteTierLimits(ctx, user, priceQuote.ToAmount); err != nil {
+		return nil, err
+	}
+	if err := s.evaluateScreeningChecks(ctx, user, nil, nil, nil, asset); err != nil {
+		return nil, err
+	}
+	if err := s.evaluateQuoteMonitoring(ctx, user, priceQuote.ToAmount, nil); err != nil {
+		return nil, err
+	}
+
 	quote := &domain.Quote{}
 	err = scanQuote(
 		s.db.QueryRow(ctx, `
@@ -154,6 +164,14 @@ func (s *ApplicationService) createTradeWithAuthorization(
 	authorizedAt *time.Time,
 	authorizationMethod string,
 ) (*domain.Trade, error) {
+	user, err := s.getUserByID(ctx, userID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, errors.New("user_not_found")
+		}
+		return nil, err
+	}
+
 	quote, err := s.getQuoteByID(ctx, quoteID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -183,9 +201,23 @@ func (s *ApplicationService) createTradeWithAuthorization(
 		return nil, err
 	}
 
+	if err := s.enforceTradeTierLimits(ctx, user, quote.NetAmount); err != nil {
+		return nil, err
+	}
+	if err := s.evaluateScreeningChecks(ctx, user, account, &quote.ID, nil, quote.FromCurrency); err != nil {
+		return nil, err
+	}
+
 	tradeID := uuid.New()
 	tradeRef := "TRD-" + strings.ToUpper(strings.ReplaceAll(tradeID.String(), "-", "")[:8])
-	depositAddress := fmt.Sprintf("sandbox://deposit/%s/%s", strings.ToLower(quote.FromCurrency), strings.ToLower(tradeRef))
+	depositAddress, err := buildDepositAddressForTrade(quote.FromCurrency, tradeRef)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := s.evaluateTradeMonitoring(ctx, user, account, quote, &tradeID, depositAddress); err != nil {
+		return nil, err
+	}
 	expiresAt := time.Now().UTC().Add(30 * time.Minute)
 	acceptedAt := time.Now().UTC()
 
@@ -194,6 +226,15 @@ func (s *ApplicationService) createTradeWithAuthorization(
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
+
+	tradeCreateKey := normalizeMoneyOperationKey(fmt.Sprintf("trade_create:%s:%s:%s", userID, quoteID, bankAccountID))
+	inserted, err := s.reserveMoneyOperationKeyTx(ctx, tx, "trade_creation", tradeCreateKey, uuid.Nil)
+	if err != nil {
+		return nil, err
+	}
+	if !inserted {
+		return nil, errors.New("duplicate_trade_request")
+	}
 
 	_, err = tx.Exec(ctx, `UPDATE quotes SET accepted_at = $2 WHERE id = $1::uuid`, quoteID, acceptedAt)
 	if err != nil {
@@ -284,6 +325,16 @@ func (s *ApplicationService) createTradeWithAuthorization(
 		return nil, err
 	}
 
+	_, err = tx.Exec(ctx, `
+        UPDATE financial_operation_keys
+        SET trade_id = $3::uuid
+        WHERE scope = $1
+          AND operation_key = $2
+    `, "trade_creation", tradeCreateKey, trade.ID)
+	if err != nil {
+		return nil, err
+	}
+
 	if err := insertTradeHistory(ctx, tx, trade.ID, nil, trade.Status, "user", "quote accepted"); err != nil {
 		return nil, err
 	}
@@ -359,6 +410,10 @@ func (s *ApplicationService) GetTradeByID(ctx context.Context, tradeID string) (
 	return s.getTradeByID(ctx, tradeID)
 }
 
+func (s *ApplicationService) GetTradeByDepositTxHash(ctx context.Context, txHash string) (*domain.Trade, error) {
+	return s.getTradeByDepositTxHash(ctx, txHash)
+}
+
 func (s *ApplicationService) UpdateTradeStatus(ctx context.Context, tradeID string, status string, metadata map[string]interface{}) error {
 	trade, err := s.getTradeByID(ctx, tradeID)
 	if err != nil {
@@ -432,21 +487,24 @@ func (s *ApplicationService) GetPendingPayouts(ctx context.Context) ([]*domain.T
 
 func (s *ApplicationService) MarkPayoutPending(ctx context.Context, tradeID string, payoutRef string) error {
 	return s.UpdateTradeStatus(ctx, tradeID, string(statemachine.TradePayoutPending), map[string]interface{}{
-		"payout_ref": payoutRef,
-		"reason":     "graph payout initiated",
+		"payout_ref":      payoutRef,
+		"reason":          "graph payout initiated",
+		"idempotency_key": fmt.Sprintf("payout_pending:%s:%s", tradeID, strings.ToLower(strings.TrimSpace(payoutRef))),
 	})
 }
 
 func (s *ApplicationService) MarkPayoutComplete(ctx context.Context, tradeID string, payoutRef string) error {
 	return s.UpdateTradeStatus(ctx, tradeID, string(statemachine.TradePayoutCompleted), map[string]interface{}{
-		"payout_ref": payoutRef,
+		"payout_ref":      payoutRef,
+		"idempotency_key": fmt.Sprintf("payout_completed:%s:%s", tradeID, strings.ToLower(strings.TrimSpace(payoutRef))),
 	})
 }
 
 func (s *ApplicationService) MarkPayoutFailed(ctx context.Context, tradeID string, payoutRef string, reason string) error {
 	return s.UpdateTradeStatus(ctx, tradeID, string(statemachine.TradePayoutFailed), map[string]interface{}{
-		"payout_ref": payoutRef,
-		"reason":     reason,
+		"payout_ref":      payoutRef,
+		"reason":          reason,
+		"idempotency_key": fmt.Sprintf("payout_failed:%s:%s", tradeID, strings.ToLower(strings.TrimSpace(payoutRef))),
 	})
 }
 
@@ -575,6 +633,20 @@ func (s *ApplicationService) updateTradeStatusTx(
 		metadata = map[string]interface{}{}
 	}
 
+	if !isAllowedTradeStatusTransition(trade.Status, status) {
+		return fmt.Errorf("invalid trade status transition: %s -> %s", trade.Status, status)
+	}
+
+	operationKey := buildTradeOperationKey(trade, status, metadata)
+	inserted, err := s.reserveMoneyOperationKeyTx(ctx, tx, statusLedgerScope(status), operationKey, trade.ID)
+	if err != nil {
+		return err
+	}
+	if !inserted {
+		s.logger.Info("duplicate trade status update ignored", "trade_id", trade.ID.String(), "status", status, "operation_key", operationKey)
+		return nil
+	}
+
 	var txHash *string
 	var confirmedAt *time.Time
 	var payoutRef *string
@@ -630,7 +702,7 @@ func (s *ApplicationService) updateTradeStatusTx(
 		completedAt = &now
 	}
 
-	_, err := tx.Exec(ctx, `
+	_, err = tx.Exec(ctx, `
         UPDATE trades
         SET status = $2::trade_status,
             deposit_txhash = COALESCE($3, deposit_txhash),
@@ -649,6 +721,16 @@ func (s *ApplicationService) updateTradeStatusTx(
     `, trade.ID, status, txHash, confirmedAt, payoutRef, completedAt, exchangeOrderID, graphConversionID, toAmountActual, disputeReason, clearDisputeReason)
 	if err != nil {
 		return err
+	}
+
+	skipLedgerPosting := false
+	if raw, ok := metadata["skip_ledger_posting"].(bool); ok && raw {
+		skipLedgerPosting = true
+	}
+	if !skipLedgerPosting {
+		if err := s.postLedgerForStatusTransitionTx(ctx, tx, trade, status, metadata, operationKey); err != nil {
+			return err
+		}
 	}
 
 	if err := insertTradeHistory(ctx, tx, trade.ID, &trade.Status, status, actor, note); err != nil {

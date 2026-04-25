@@ -29,12 +29,27 @@ type Tier2KYCRequest struct {
 	ProofOfAddressBase64 string    `json:"proof_of_address_base64"`
 }
 
+type SumsubKYCRequest struct {
+	UserID      uuid.UUID `json:"user_id"`
+	TargetTier  string    `json:"target_tier"`
+	LevelName   string    `json:"level_name"`
+	FirstName   string    `json:"first_name"`
+	LastName    string    `json:"last_name"`
+	DateOfBirth string    `json:"date_of_birth"`
+	Email       string    `json:"email"`
+	PhoneNumber string    `json:"phone_number"`
+	TTLInSecs   int       `json:"ttl_in_secs"`
+}
+
 type KYCResult struct {
-	Status      string `json:"status"`
-	Tier        string `json:"tier"`
-	Reason      string `json:"reason"`
-	Provider    string `json:"provider"`
-	ProviderRef string `json:"provider_ref"`
+	Status          string `json:"status"`
+	Tier            string `json:"tier"`
+	Reason          string `json:"reason"`
+	Provider        string `json:"provider"`
+	ProviderRef     string `json:"provider_ref"`
+	ProviderStatus  string `json:"provider_status,omitempty"`
+	LevelName       string `json:"level_name,omitempty"`
+	VerificationURL string `json:"verification_url,omitempty"`
 }
 
 type KYCRepository interface {

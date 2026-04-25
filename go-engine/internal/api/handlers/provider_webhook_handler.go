@@ -4,7 +4,10 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"os"
 	"strings"
+
+	"convert-chain/go-engine/internal/api/dto"
 
 	"github.com/gin-gonic/gin"
 )
@@ -12,7 +15,7 @@ import (
 type ProviderWebhookService interface {
 	HandleSmileIDWebhook(ctx context.Context, payload []byte, signature string, timestamp string) error
 	HandleSumsubWebhook(ctx context.Context, payload []byte, digest string, algorithm string) error
-	HandleGraphWebhook(ctx context.Context, payload []byte, signature string) error
+	HandleGraphWebhook(ctx context.Context, payload []byte, signature string, eventID string) error
 }
 
 type ProviderWebhookHandler struct {
@@ -86,8 +89,24 @@ func (h *ProviderWebhookHandler) Graph(c *gin.Context) {
 		c.GetHeader("X-Webhook-Signature"),
 		c.GetHeader("X-Signature"),
 	)
+	eventID := firstNonEmptyHeader(
+		c.GetHeader("X-Graph-Event-Id"),
+		c.GetHeader("Graph-Event-Id"),
+		c.GetHeader("X-Webhook-Event-Id"),
+	)
 
-	if err := h.svc.HandleGraphWebhook(c.Request.Context(), body, signature); err != nil {
+	eventIDMode := graphWebhookEventIDMode()
+	if eventID == "" {
+		if eventIDMode == "enforce" {
+			c.JSON(http.StatusBadRequest, dto.NewError(dto.ErrCodeWebhookMissingEventID, "X-Graph-Event-Id header is required", nil))
+			return
+		}
+		if eventIDMode == "warn" {
+			c.Header("Warning", "299 - Missing Graph webhook event id header; replay protection is in compatibility mode")
+		}
+	}
+
+	if err := h.svc.HandleGraphWebhook(c.Request.Context(), body, signature, eventID); err != nil {
 		status, response := providerWebhookErrorResponse(err)
 		c.JSON(status, response)
 		return
@@ -99,13 +118,25 @@ func (h *ProviderWebhookHandler) Graph(c *gin.Context) {
 func providerWebhookErrorResponse(err error) (int, gin.H) {
 	switch strings.TrimSpace(err.Error()) {
 	case "invalid_webhook_signature":
-		return http.StatusUnauthorized, gin.H{"error": "invalid webhook signature"}
+		return http.StatusUnauthorized, gin.H{"error": dto.NewError(dto.ErrCodeWebhookInvalidSignature, "Invalid webhook signature", nil).Error}
 	case "malformed_webhook_payload":
-		return http.StatusBadRequest, gin.H{"error": "malformed webhook payload"}
+		return http.StatusBadRequest, gin.H{"error": dto.NewError(dto.ErrCodeWebhookMalformedPayload, "Malformed webhook payload", nil).Error}
+	case "webhook_missing_event_id":
+		return http.StatusBadRequest, gin.H{"error": dto.NewError(dto.ErrCodeWebhookMissingEventID, "Missing webhook event id", nil).Error}
 	case "provider_not_configured":
-		return http.StatusServiceUnavailable, gin.H{"error": "provider not configured"}
+		return http.StatusServiceUnavailable, gin.H{"error": dto.NewError(dto.ErrCodeWebhookProviderDisabled, "Provider is not configured", nil).Error}
 	default:
-		return http.StatusInternalServerError, gin.H{"error": "webhook processing failed", "details": err.Error()}
+		return http.StatusInternalServerError, gin.H{"error": dto.NewError(dto.ErrCodeWebhookProcessingFailed, "Webhook processing failed", err.Error()).Error}
+	}
+}
+
+func graphWebhookEventIDMode() string {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv("GRAPH_WEBHOOK_EVENT_ID_MODE")))
+	switch value {
+	case "off", "warn", "enforce":
+		return value
+	default:
+		return "warn"
 	}
 }
 

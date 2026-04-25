@@ -59,6 +59,45 @@ Expected checks:
 - SmileID and Sumsub:
   - credentials are present for the configured KYC tiers
 
+## 3A. Sumsub-first Telegram launch checks
+
+The first production launch uses Telegram plus Sumsub. SmileID may remain sandbox-only until its production account is funded, but it must not be the active production KYC provider.
+
+Required Go engine settings:
+
+- `KYC_PRIMARY_PROVIDER=sumsub`
+- `SUMSUB_APP_TOKEN` and `SUMSUB_SECRET_KEY` from the same Sumsub mode
+- `SUMSUB_USE_SANDBOX=false` in production
+- `SUMSUB_WEBHOOK_SECRET` matching the Sumsub webhook manager secret
+- `SUMSUB_WEBHOOK_PUBLIC_BASE_URL=<public-go-engine-base-url>`
+- `SUMSUB_TIER1_LEVEL_NAME`, `SUMSUB_TIER2_LEVEL_NAME`, `SUMSUB_TIER3_LEVEL_NAME`, and `SUMSUB_TIER4_LEVEL_NAME` matching dashboard level names
+
+Point Sumsub webhook delivery to:
+
+- `<public-go-engine-base-url>/webhooks/kyc/sumsub`
+
+The Sumsub webhook must include `X-Payload-Digest` and `X-Payload-Digest-Alg`. ConvertChain verifies the raw request body with the configured webhook secret, persists the event, deduplicates by Sumsub correlation/event identifiers and payload hash, and only applies final approval/rejection when the review result contains a terminal answer such as `GREEN` or `RED`.
+
+Required Python bot settings for the Telegram-only launch:
+
+- `ENABLED_CHANNELS=telegram`
+- `TELEGRAM_BOT_TOKEN=<BotFather token>`
+- `TELEGRAM_WEBHOOK_SECRET=<random secret>` and configure the same secret when setting the Telegram webhook
+- `TELEGRAM_TRUSTED_DELIVERY=false` unless an ingress layer authenticates Telegram delivery before the bot
+
+Keep WhatsApp values empty or placeholder while `ENABLED_CHANNELS` does not include `whatsapp`. The bot will not initialize WhatsApp or poll WhatsApp notifications in Telegram-only mode.
+
+Expected user flow:
+
+1. User starts onboarding in Telegram.
+2. Engine creates or updates the user and starts Sumsub Tier 1 verification.
+3. Bot sends the Sumsub WebSDK verification link returned by the engine.
+4. User completes Sumsub verification and returns to Telegram.
+5. Sumsub webhook approves/rejects KYC.
+6. User types `status`; the bot sees the updated KYC state and proceeds to transaction-password setup.
+
+If the Sumsub link expires, `status` can return a fresh WebSDK link while the applicant is still pending.
+
 ## 4. Binance sandbox balance checks
 
 Before testing a trade size, confirm the test account holds enough of the asset being sold.
@@ -129,3 +168,52 @@ Users should receive automatic updates for:
 - dispute resolved
 
 When no active trade exists, `status` should show the most recent relevant trade outcome instead of a dead end.
+
+## 9. Safe rollout and rollback toggles
+
+Two enforcement controls are now staged behind reversible environment flags.
+
+1. Legacy trade create endpoint (`POST /api/v1/trades`)
+
+- Flag: `TRADE_CREATE_ENDPOINT_MODE`
+- Allowed values: `allow`, `warn`, `enforce`
+- Default: `warn`
+
+Behavior:
+
+- `allow`: legacy endpoint remains available with no deprecation response headers.
+- `warn`: legacy endpoint is still available, but responds with deprecation headers (`Deprecation`, `Sunset`, `Warning`) to drive client migration telemetry.
+- `enforce`: legacy endpoint is blocked with `410 Gone` and error code `ENDPOINT_DEPRECATED`.
+
+Rollback:
+
+- Immediate rollback is setting `TRADE_CREATE_ENDPOINT_MODE=warn` (or `allow`) and restarting the Go engine.
+
+2. Graph webhook event identifier requirement
+
+- Flag: `GRAPH_WEBHOOK_EVENT_ID_MODE`
+- Allowed values: `off`, `warn`, `enforce`
+- Default: `warn`
+
+Behavior:
+
+- `off`: no requirement for event-id header.
+- `warn`: missing event-id header is accepted, but a warning header is returned and service warning logs are emitted.
+- `enforce`: missing event-id header is rejected with `400` and error code `WEBHOOK_MISSING_EVENT_ID`.
+
+Accepted event-id headers:
+
+- `X-Graph-Event-Id`
+- `Graph-Event-Id`
+- `X-Webhook-Event-Id`
+
+Rollback:
+
+- Immediate rollback is setting `GRAPH_WEBHOOK_EVENT_ID_MODE=warn` (or `off`) and restarting the Go engine.
+
+Recommended rollout order:
+
+1. Deploy with defaults (`warn` modes).
+2. Monitor warning volume and client/provider conformance for at least one full business cycle.
+3. Move one flag at a time to `enforce`.
+4. Keep rollback runbook and on-call ownership explicit for each cutover window.

@@ -81,6 +81,10 @@ type Trade struct {
 	// Fetched from the blockchain watcher, not stored permanently on this table.
 	// Used by the guard that checks "enough confirmations before confirming deposit."
 	Confirmations int `json:"-" db:"-"`
+
+	// RequiredConfirmations is the runtime threshold selected from policy for the
+	// active currency/network. When zero, FSM fallback defaults are used.
+	RequiredConfirmations int `json:"-" db:"-"`
 }
 
 // TradeReceipt is the user-facing settlement summary for a completed payout.

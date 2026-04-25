@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/hmac"
+	"crypto/sha1"
 	"crypto/sha256"
+	"crypto/sha512"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"hash"
 	"io"
 	"net/http"
 	"net/url"
@@ -22,6 +25,7 @@ type Client struct {
 	appToken   string
 	secretKey  string
 	baseURL    string
+	sandbox    bool
 	httpClient *http.Client
 }
 
@@ -30,12 +34,17 @@ func NewClient(appToken, secretKey string, sandbox bool) *Client {
 		appToken:   strings.TrimSpace(appToken),
 		secretKey:  strings.TrimSpace(secretKey),
 		baseURL:    baseURL,
+		sandbox:    sandbox,
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}
 }
 
 func (c *Client) Enabled() bool {
 	return c != nil && c.appToken != "" && c.secretKey != ""
+}
+
+func (c *Client) IsSandbox() bool {
+	return c != nil && c.sandbox
 }
 
 func (c *Client) VerifyWebhookSignature(payload []byte, digest, algorithm, secretOverride string) bool {
@@ -51,8 +60,7 @@ func (c *Client) VerifyWebhookSignature(payload []byte, digest, algorithm, secre
 		return false
 	}
 
-	normalizedDigest := strings.ToLower(strings.TrimSpace(digest))
-	normalizedDigest = strings.TrimPrefix(normalizedDigest, "sha256=")
+	normalizedDigest := normalizeDigest(digest)
 	if normalizedDigest == "" {
 		return false
 	}
@@ -62,15 +70,41 @@ func (c *Client) VerifyWebhookSignature(payload []byte, digest, algorithm, secre
 		normalizedAlgorithm = "HMAC_SHA256_HEX"
 	}
 
+	var h func() hash.Hash
 	switch normalizedAlgorithm {
+	case "HMAC_SHA1", "HMAC_SHA1_HEX", "SHA1":
+		h = sha1.New
 	case "HMAC_SHA256", "HMAC_SHA256_HEX", "SHA256":
-		mac := hmac.New(sha256.New, []byte(secret))
-		mac.Write(payload)
-		expected := hex.EncodeToString(mac.Sum(nil))
-		return hmac.Equal([]byte(normalizedDigest), []byte(expected))
+		h = sha256.New
+	case "HMAC_SHA512", "HMAC_SHA512_HEX", "SHA512":
+		h = sha512.New
 	default:
 		return false
 	}
+
+	mac := hmac.New(h, []byte(secret))
+	mac.Write(payload)
+	expected := mac.Sum(nil)
+
+	provided, err := hex.DecodeString(normalizedDigest)
+	if err == nil && len(provided) == len(expected) {
+		return hmac.Equal(provided, expected)
+	}
+
+	expectedHex := hex.EncodeToString(expected)
+	return hmac.Equal([]byte(normalizedDigest), []byte(expectedHex))
+}
+
+func normalizeDigest(raw string) string {
+	trimmed := strings.ToLower(strings.TrimSpace(raw))
+	if trimmed == "" {
+		return ""
+	}
+
+	for _, prefix := range []string{"sha1=", "sha256=", "sha512=", "hmac-sha1=", "hmac-sha256=", "hmac-sha512=", "signature=", "sig="} {
+		trimmed = strings.TrimPrefix(trimmed, prefix)
+	}
+	return strings.TrimSpace(trimmed)
 }
 
 type ApplicantRequest struct {
@@ -92,7 +126,7 @@ type Applicant struct {
 
 func (c *Client) CreateApplicant(ctx context.Context, req ApplicantRequest) (*Applicant, error) {
 	if !c.Enabled() {
-		return nil, fmt.Errorf("sumsub is not configured")
+		return nil, &ProviderError{Operation: "create_applicant", Code: "SUMSUB_NOT_CONFIGURED", Message: "sumsub is not configured"}
 	}
 
 	levelName := strings.TrimSpace(req.LevelName)
@@ -138,8 +172,7 @@ func (c *Client) CreateApplicant(ctx context.Context, req ApplicantRequest) (*Ap
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		bodyText, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("sumsub create applicant failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(bodyText)))
+		return nil, decodeProviderError("create_applicant", resp)
 	}
 
 	var applicant Applicant
@@ -151,6 +184,74 @@ func (c *Client) CreateApplicant(ctx context.Context, req ApplicantRequest) (*Ap
 	}
 
 	return &applicant, nil
+}
+
+type WebSDKLinkRequest struct {
+	UserID      string
+	LevelName   string
+	Email       string
+	PhoneNumber string
+	TTLInSecs   int
+}
+
+type WebSDKLink struct {
+	URL string `json:"url"`
+}
+
+func (c *Client) CreateWebSDKLink(ctx context.Context, req WebSDKLinkRequest) (*WebSDKLink, error) {
+	if !c.Enabled() {
+		return nil, &ProviderError{Operation: "create_websdk_link", Code: "SUMSUB_NOT_CONFIGURED", Message: "sumsub is not configured"}
+	}
+
+	levelName := strings.TrimSpace(req.LevelName)
+	if levelName == "" {
+		levelName = "telegram-tier1"
+	}
+	ttl := req.TTLInSecs
+	if ttl <= 0 {
+		ttl = 1800
+	}
+
+	bodyPayload := map[string]any{
+		"levelName": levelName,
+		"userId":    strings.TrimSpace(req.UserID),
+		"ttlInSecs": ttl,
+	}
+	identifiers := map[string]string{}
+	if strings.TrimSpace(req.Email) != "" {
+		identifiers["email"] = strings.TrimSpace(req.Email)
+	}
+	if strings.TrimSpace(req.PhoneNumber) != "" {
+		identifiers["phone"] = strings.TrimSpace(req.PhoneNumber)
+	}
+	if len(identifiers) > 0 {
+		bodyPayload["applicantIdentifiers"] = identifiers
+	}
+
+	body, err := json.Marshal(bodyPayload)
+	if err != nil {
+		return nil, fmt.Errorf("marshal websdk link request: %w", err)
+	}
+
+	uri := "/resources/sdkIntegrations/levels/-/websdkLink?lang=en&source=api"
+	resp, err := c.do(ctx, http.MethodPost, uri, body)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, decodeProviderError("create_websdk_link", resp)
+	}
+
+	var link WebSDKLink
+	if err := json.NewDecoder(resp.Body).Decode(&link); err != nil {
+		return nil, fmt.Errorf("decode websdk link response: %w", err)
+	}
+	if strings.TrimSpace(link.URL) == "" {
+		return nil, &ProviderError{Operation: "create_websdk_link", Code: "SUMSUB_EMPTY_WEBSDK_LINK", Message: "sumsub websdk link response missing url"}
+	}
+	return &link, nil
 }
 
 func (c *Client) do(ctx context.Context, method, uri string, body []byte) (*http.Response, error) {
@@ -171,6 +272,68 @@ func (c *Client) sign(method, uri string, body []byte, timestamp string) string 
 	mac := hmac.New(sha256.New, []byte(c.secretKey))
 	mac.Write([]byte(payload))
 	return hex.EncodeToString(mac.Sum(nil))
+}
+
+type ProviderError struct {
+	Operation  string
+	Code       string
+	Message    string
+	StatusCode int
+	Retryable  bool
+}
+
+func (e *ProviderError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.StatusCode > 0 {
+		return fmt.Sprintf("sumsub %s failed (%s, status=%d): %s", e.Operation, e.Code, e.StatusCode, e.Message)
+	}
+	return fmt.Sprintf("sumsub %s failed (%s): %s", e.Operation, e.Code, e.Message)
+}
+
+func decodeProviderError(operation string, resp *http.Response) error {
+	bodyText, _ := io.ReadAll(resp.Body)
+	trimmedBody := strings.TrimSpace(string(bodyText))
+
+	var apiErr struct {
+		Description   string `json:"description"`
+		Code          int    `json:"code"`
+		CorrelationID string `json:"correlationId"`
+		ErrorCode     int    `json:"errorCode"`
+		ErrorName     string `json:"errorName"`
+		Message       string `json:"message"`
+	}
+	if trimmedBody != "" {
+		_ = json.Unmarshal(bodyText, &apiErr)
+	}
+
+	message := firstNonEmpty(apiErr.Description, apiErr.Message, trimmedBody, resp.Status)
+	code := strings.ToUpper(strings.TrimSpace(apiErr.ErrorName))
+	if code == "" && apiErr.ErrorCode != 0 {
+		code = fmt.Sprintf("SUMSUB_%d", apiErr.ErrorCode)
+	}
+	if code == "" {
+		code = fmt.Sprintf("SUMSUB_HTTP_%d", resp.StatusCode)
+	}
+	code = strings.NewReplacer(" ", "_", "-", "_").Replace(code)
+
+	return &ProviderError{
+		Operation:  operation,
+		Code:       code,
+		Message:    message,
+		StatusCode: resp.StatusCode,
+		Retryable:  resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500,
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 type LivenessRequest struct {

@@ -42,6 +42,10 @@ func (p *payoutRepoStub) GetTradeByID(_ context.Context, _ string) (*domain.Trad
 	return nil, nil
 }
 
+func (p *payoutRepoStub) GetTradeByDepositTxHash(_ context.Context, _ string) (*domain.Trade, error) {
+	return nil, nil
+}
+
 func (p *payoutRepoStub) UpdateTradeStatus(_ context.Context, tradeID string, status string, metadata map[string]interface{}) error {
 	p.updates = append(p.updates, statusUpdateCall{tradeID: tradeID, status: status, metadata: metadata})
 	return nil
@@ -93,6 +97,9 @@ func TestPayoutProcessorInitiatesPayoutAndMarksPending(t *testing.T) {
 	}
 	if got := repo.updates[0].metadata["payout_ref"]; got != "payout_123" {
 		t.Fatalf("expected payout_ref payout_123, got %#v", got)
+	}
+	if _, ok := repo.updates[0].metadata["idempotency_key"]; !ok {
+		t.Fatalf("expected idempotency_key on payout pending update")
 	}
 }
 

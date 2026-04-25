@@ -34,6 +34,10 @@ func (r *conversionRepoStub) GetTradeByID(_ context.Context, _ string) (*domain.
 	return nil, nil
 }
 
+func (r *conversionRepoStub) GetTradeByDepositTxHash(_ context.Context, _ string) (*domain.Trade, error) {
+	return nil, nil
+}
+
 func (r *conversionRepoStub) UpdateTradeStatus(_ context.Context, tradeID string, status string, metadata map[string]interface{}) error {
 	r.updates = append(r.updates, statusUpdateCall{tradeID: tradeID, status: status, metadata: metadata})
 	return nil
@@ -92,6 +96,12 @@ func TestConversionProcessorExecutesConfirmedTrade(t *testing.T) {
 	}
 	if got := repo.updates[1].metadata["exchange_order_id"]; got != "order-123" {
 		t.Fatalf("expected exchange_order_id order-123, got %#v", got)
+	}
+	if _, ok := repo.updates[0].metadata["idempotency_key"]; !ok {
+		t.Fatalf("expected idempotency_key on conversion in-progress update")
+	}
+	if _, ok := repo.updates[1].metadata["idempotency_key"]; !ok {
+		t.Fatalf("expected idempotency_key on conversion completed update")
 	}
 }
 
@@ -157,5 +167,8 @@ func TestConversionProcessorEscalatesStaleInProgressTrade(t *testing.T) {
 	}
 	if repo.updates[0].status != string(statemachine.TradeDispute) {
 		t.Fatalf("expected recovered status %s, got %s", statemachine.TradeDispute, repo.updates[0].status)
+	}
+	if _, ok := repo.updates[0].metadata["idempotency_key"]; !ok {
+		t.Fatalf("expected idempotency_key on stale conversion dispute update")
 	}
 }

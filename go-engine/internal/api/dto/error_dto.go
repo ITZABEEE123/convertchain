@@ -4,7 +4,8 @@ package dto
 // ALL error responses from the Go engine have this shape.
 //
 // Example:
-//   { "error": { "code": "QUOTE_EXPIRED", "message": "...", "details": null } }
+//
+//	{ "error": { "code": "QUOTE_EXPIRED", "message": "...", "details": null } }
 type ErrorResponse struct {
 	Error ErrorBody `json:"error"`
 }
@@ -17,24 +18,34 @@ type ErrorBody struct {
 
 // Standard error codes.
 const (
-	ErrCodeUnauthorized      = "UNAUTHORIZED"
-	ErrCodeNotFound          = "NOT_FOUND"
-	ErrCodeValidation        = "VALIDATION_ERROR"
-	ErrCodeConflict          = "CONFLICT"
-	ErrCodeKYCRequired       = "KYC_REQUIRED"
-	ErrCodeKYCNotApproved    = "KYC_NOT_APPROVED"
-	ErrCodeQuoteExpired      = "QUOTE_EXPIRED"
-	ErrCodeQuoteUsed         = "QUOTE_ALREADY_USED"
-	ErrCodeInsufficientFunds = "INSUFFICIENT_FUNDS"
-	ErrCodeRateLimited       = "RATE_LIMITED"
-	ErrCodeInternalError     = "INTERNAL_ERROR"
-	ErrCodeTradePreflightFailed = "TRADE_PREFLIGHT_FAILED"
+	ErrCodeUnauthorized              = "UNAUTHORIZED"
+	ErrCodeNotFound                  = "NOT_FOUND"
+	ErrCodeValidation                = "VALIDATION_ERROR"
+	ErrCodeConflict                  = "CONFLICT"
+	ErrCodeKYCRequired               = "KYC_REQUIRED"
+	ErrCodeKYCNotApproved            = "KYC_NOT_APPROVED"
+	ErrCodeQuoteExpired              = "QUOTE_EXPIRED"
+	ErrCodeQuoteUsed                 = "QUOTE_ALREADY_USED"
+	ErrCodeInsufficientFunds         = "INSUFFICIENT_FUNDS"
+	ErrCodeRateLimited               = "RATE_LIMITED"
+	ErrCodeInternalError             = "INTERNAL_ERROR"
+	ErrCodeTradePreflightFailed      = "TRADE_PREFLIGHT_FAILED"
 	ErrCodeNotificationClaimConflict = "NOTIFICATION_CLAIM_CONFLICT"
-	ErrCodeTxnPasswordInvalid = "TRANSACTION_PASSWORD_INVALID"
-	ErrCodeTxnPasswordLocked  = "TRANSACTION_PASSWORD_LOCKED"
-	ErrCodeTxnPasswordMissing = "TRANSACTION_PASSWORD_NOT_SET"
-	ErrCodeDeletionBlocked    = "ACCOUNT_DELETION_BLOCKED"
-	ErrCodeDeletionQuota      = "ACCOUNT_DELETION_QUOTA_EXCEEDED"
+	ErrCodeTxnPasswordInvalid        = "TRANSACTION_PASSWORD_INVALID"
+	ErrCodeTxnPasswordLocked         = "TRANSACTION_PASSWORD_LOCKED"
+	ErrCodeTxnPasswordMissing        = "TRANSACTION_PASSWORD_NOT_SET"
+	ErrCodeEndpointDeprecated        = "ENDPOINT_DEPRECATED"
+	ErrCodeWebhookMissingEventID     = "WEBHOOK_MISSING_EVENT_ID"
+	ErrCodeWebhookInvalidSignature   = "WEBHOOK_INVALID_SIGNATURE"
+	ErrCodeWebhookMalformedPayload   = "WEBHOOK_MALFORMED_PAYLOAD"
+	ErrCodeWebhookProviderDisabled   = "WEBHOOK_PROVIDER_NOT_CONFIGURED"
+	ErrCodeWebhookProcessingFailed   = "WEBHOOK_PROCESSING_FAILED"
+	ErrCodeLimitExceeded             = "LIMIT_EXCEEDED"
+	ErrCodeScreeningBlocked          = "SCREENING_BLOCKED"
+	ErrCodeScreeningReviewRequired   = "SCREENING_REVIEW_REQUIRED"
+	ErrCodeComplianceReviewRequired  = "COMPLIANCE_REVIEW_REQUIRED"
+	ErrCodeDeletionBlocked           = "ACCOUNT_DELETION_BLOCKED"
+	ErrCodeDeletionQuota             = "ACCOUNT_DELETION_QUOTA_EXCEEDED"
 )
 
 func NewError(code, message string, details interface{}) ErrorResponse {

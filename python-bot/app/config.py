@@ -16,12 +16,16 @@ class Settings(BaseSettings):
 
     redis_url: str = "redis://localhost:6379/0"
 
-    whatsapp_app_secret: str
-    whatsapp_verify_token: str
-    whatsapp_access_token: str
-    whatsapp_phone_number_id: str
+    enabled_channels: str = "telegram"
+
+    whatsapp_app_secret: str = ""
+    whatsapp_verify_token: str = ""
+    whatsapp_access_token: str = ""
+    whatsapp_phone_number_id: str = ""
 
     telegram_bot_token: str
+    telegram_webhook_secret: str | None = None
+    telegram_trusted_delivery: bool = False
 
     telegram_provider: str = "direct"
     whatsapp_primary_provider: str = "meta"
@@ -51,6 +55,22 @@ class Settings(BaseSettings):
         return str(self.openclaw_base_url)
 
     @property
+    def enabled_channel_set(self) -> set[str]:
+        return {
+            item.strip().lower()
+            for item in self.enabled_channels.split(",")
+            if item.strip()
+        }
+
+    @property
+    def telegram_enabled(self) -> bool:
+        return "telegram" in self.enabled_channel_set
+
+    @property
+    def whatsapp_enabled(self) -> bool:
+        return "whatsapp" in self.enabled_channel_set
+
+    @property
     def telegram_uses_openclaw(self) -> bool:
         return self.telegram_provider == "openclaw" or self.openclaw_telegram_enabled
 
@@ -61,6 +81,10 @@ class Settings(BaseSettings):
     @property
     def openclaw_enabled(self) -> bool:
         return self.telegram_uses_openclaw or self.whatsapp_openclaw_enabled
+
+    @property
+    def telegram_webhook_secret_required(self) -> bool:
+        return self.is_production and not self.telegram_trusted_delivery
 
     @property
     def admin_telegram_user_id_set(self) -> set[str]:
@@ -84,6 +108,22 @@ class Settings(BaseSettings):
         if not value.strip():
             raise ValueError("SERVICE_TOKEN must not be empty")
         return value
+
+    @field_validator("enabled_channels")
+    @classmethod
+    def validate_enabled_channels(cls, value: str) -> str:
+        allowed = {"telegram", "whatsapp"}
+        selected = {
+            item.strip().lower()
+            for item in value.split(",")
+            if item.strip()
+        }
+        if not selected:
+            raise ValueError("enabled_channels must include at least one channel")
+        unsupported = selected - allowed
+        if unsupported:
+            raise ValueError(f"enabled_channels contains unsupported channels: {sorted(unsupported)}")
+        return ",".join(sorted(selected))
 
     @field_validator("telegram_provider")
     @classmethod

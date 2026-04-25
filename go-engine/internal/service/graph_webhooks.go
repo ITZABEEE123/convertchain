@@ -6,17 +6,30 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"strings"
 
 	"convert-chain/go-engine/internal/statemachine"
 )
 
-func (s *ApplicationService) HandleGraphWebhook(ctx context.Context, payload []byte, signature string) error {
+func (s *ApplicationService) HandleGraphWebhook(ctx context.Context, payload []byte, signature string, eventID string) error {
 	if s.graph == nil {
 		return errProviderNotConfigured
 	}
 	if !s.verifyGraphWebhookSignature(payload, signature) {
 		return errInvalidWebhookSignature
+	}
+
+	normalizedEventID := strings.TrimSpace(eventID)
+	switch graphWebhookEventIDMode() {
+	case "enforce":
+		if normalizedEventID == "" {
+			return fmt.Errorf("webhook_missing_event_id")
+		}
+	case "warn":
+		if normalizedEventID == "" {
+			s.logger.Warn("graph webhook received without explicit event id header; compatibility replay mode in effect")
+		}
 	}
 
 	raw, err := decodeWebhookPayload(payload)
@@ -35,7 +48,12 @@ func (s *ApplicationService) HandleGraphWebhook(ctx context.Context, payload []b
 		eventType = "graph.callback"
 	}
 
-	eventID, processed, err := s.ensureWebhookEvent(ctx, "graph", eventType, payload, signature)
+	dedupeEventType := eventType
+	if normalizedEventID != "" {
+		dedupeEventType = eventType + "|event_id=" + strings.ToLower(normalizedEventID)
+	}
+
+	eventUUID, processed, err := s.ensureWebhookEvent(ctx, "graph", dedupeEventType, payload, signature, normalizedEventID)
 	if err != nil {
 		return err
 	}
@@ -68,18 +86,18 @@ func (s *ApplicationService) HandleGraphWebhook(ctx context.Context, payload []b
 
 	if payoutID == "" {
 		s.logger.Warn("ignoring graph webhook without payout identifier", "event_type", eventType)
-		return s.markWebhookEventProcessed(ctx, eventID, nil)
+		return s.markWebhookEventProcessed(ctx, eventUUID, nil)
 	}
 
 	trade, err := s.getTradeByGraphPayoutID(ctx, payoutID)
 	if err != nil {
-		if markErr := s.markWebhookEventProcessed(ctx, eventID, err); markErr != nil {
+		if markErr := s.markWebhookEventProcessed(ctx, eventUUID, err); markErr != nil {
 			return markErr
 		}
 		return err
 	}
 	if trade == nil {
-		if markErr := s.markWebhookEventProcessed(ctx, eventID, errWebhookTargetNotFound); markErr != nil {
+		if markErr := s.markWebhookEventProcessed(ctx, eventUUID, errWebhookTargetNotFound); markErr != nil {
 			return markErr
 		}
 		s.logger.Warn("ignoring graph webhook without a matching trade", "payout_id", payoutID, "event_type", eventType)
@@ -98,16 +116,26 @@ func (s *ApplicationService) HandleGraphWebhook(ctx context.Context, payload []b
 		}
 	default:
 		s.logger.Info("ignoring non-terminal graph webhook event", "trade_id", trade.ID.String(), "payout_id", payoutID, "event_type", eventType, "status", status)
-		return s.markWebhookEventProcessed(ctx, eventID, nil)
+		return s.markWebhookEventProcessed(ctx, eventUUID, nil)
 	}
 	if err != nil {
-		if markErr := s.markWebhookEventProcessed(ctx, eventID, err); markErr != nil {
+		if markErr := s.markWebhookEventProcessed(ctx, eventUUID, err); markErr != nil {
 			return markErr
 		}
 		return err
 	}
 
-	return s.markWebhookEventProcessed(ctx, eventID, nil)
+	return s.markWebhookEventProcessed(ctx, eventUUID, nil)
+}
+
+func graphWebhookEventIDMode() string {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv("GRAPH_WEBHOOK_EVENT_ID_MODE")))
+	switch value {
+	case "off", "warn", "enforce":
+		return value
+	default:
+		return "warn"
+	}
 }
 
 func (s *ApplicationService) verifyGraphWebhookSignature(payload []byte, signature string) bool {

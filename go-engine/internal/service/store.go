@@ -248,6 +248,58 @@ func (s *ApplicationService) getTradeByGraphPayoutID(ctx context.Context, payout
 	}
 	return trade, nil
 }
+
+func (s *ApplicationService) getTradeByDepositTxHash(ctx context.Context, txHash string) (*domain.Trade, error) {
+	trimmed := strings.TrimSpace(txHash)
+	if trimmed == "" {
+		return nil, nil
+	}
+
+	trade := &domain.Trade{}
+	err := scanTrade(
+		s.db.QueryRow(ctx, `
+			SELECT
+				id,
+				trade_ref,
+				user_id,
+				quote_id,
+				bank_account_id,
+				status::text,
+				from_currency::text,
+				to_currency::text,
+				from_amount,
+				to_amount_expected,
+				to_amount_actual,
+				fee_amount,
+				deposit_address,
+				deposit_txhash,
+				deposit_confirmed_at,
+				exchange_order_id,
+				graph_conversion_id,
+				graph_payout_id,
+				payout_authorized_at,
+				payout_authorization_method,
+				dispute_reason,
+				expires_at,
+				completed_at,
+				created_at,
+				updated_at
+			FROM trades
+			WHERE LOWER(COALESCE(deposit_txhash, '')) = LOWER($1)
+			ORDER BY updated_at DESC
+			LIMIT 1
+		`, trimmed),
+		trade,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return trade, nil
+}
+
 func (s *ApplicationService) getBankAccountByID(ctx context.Context, bankAccountID string) (*domain.BankAccount, error) {
 	account := &domain.BankAccount{}
 	err := scanBankAccount(

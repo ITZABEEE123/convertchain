@@ -43,7 +43,25 @@ NOTIFICATION_POLL_INTERVAL_SECONDS = 2.0
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    log.info("ConvertChain bot starting", environment=settings.environment)
+    log.info("ConvertChain bot starting", environment=settings.environment, enabled_channels=sorted(settings.enabled_channel_set))
+
+    if settings.telegram_enabled and settings.telegram_webhook_secret_required and not settings.telegram_webhook_secret:
+        raise RuntimeError(
+            "TELEGRAM_WEBHOOK_SECRET is required in production unless TELEGRAM_TRUSTED_DELIVERY=true"
+        )
+    if settings.whatsapp_enabled:
+        missing_whatsapp = [
+            name
+            for name, value in {
+                "WHATSAPP_APP_SECRET": settings.whatsapp_app_secret,
+                "WHATSAPP_VERIFY_TOKEN": settings.whatsapp_verify_token,
+                "WHATSAPP_ACCESS_TOKEN": settings.whatsapp_access_token,
+                "WHATSAPP_PHONE_NUMBER_ID": settings.whatsapp_phone_number_id,
+            }.items()
+            if not value
+        ]
+        if missing_whatsapp:
+            raise RuntimeError(f"WhatsApp is enabled but required config is missing: {', '.join(missing_whatsapp)}")
 
     redis_client = aioredis.from_url(
         settings.redis_url,
@@ -67,28 +85,33 @@ async def lifespan(app: FastAPI):
         token=settings.openclaw_gateway_token,
     )
 
-    providers = {
-        "meta_whatsapp": MetaWhatsAppProvider(
+    providers: dict[str, Any] = {}
+    if settings.whatsapp_enabled:
+        providers["meta_whatsapp"] = MetaWhatsAppProvider(
             access_token=settings.whatsapp_access_token,
             phone_number_id=settings.whatsapp_phone_number_id,
             app_secret=settings.whatsapp_app_secret,
-        ),
-        "telegram_direct": TelegramDirectProvider(
+        )
+    if settings.telegram_enabled:
+        providers["telegram_direct"] = TelegramDirectProvider(
             bot_token=settings.telegram_bot_token,
-        ),
-        "openclaw_telegram": OpenClawRelayProvider(
+            webhook_secret=settings.telegram_webhook_secret,
+            trusted_delivery=settings.telegram_trusted_delivery or not settings.is_production,
+        )
+    if settings.telegram_enabled or settings.openclaw_telegram_enabled:
+        providers["openclaw_telegram"] = OpenClawRelayProvider(
             channel="telegram",
             inbound_secret=settings.openclaw_inbound_secret,
             gateway_client=openclaw_gateway,
             outbound_enabled=bool(settings.openclaw_gateway_token and settings.telegram_uses_openclaw),
-        ),
-        "openclaw_whatsapp": OpenClawRelayProvider(
+        )
+    if settings.whatsapp_enabled or settings.openclaw_whatsapp_enabled:
+        providers["openclaw_whatsapp"] = OpenClawRelayProvider(
             channel="whatsapp",
             inbound_secret=settings.openclaw_inbound_secret,
             gateway_client=openclaw_gateway,
             outbound_enabled=bool(settings.openclaw_gateway_token and settings.whatsapp_openclaw_enabled),
-        ),
-    }
+        )
 
     app_state["redis"] = redis_client
     app_state["session"] = session_service
@@ -151,17 +174,27 @@ app = FastAPI(
 def _notification_routes(providers: dict[str, Any]) -> list[tuple[str, str, Any]]:
     routes: list[tuple[str, str, Any]] = []
 
-    telegram_provider = providers["telegram_direct"]
-    if settings.telegram_uses_openclaw and providers["openclaw_telegram"].supports("telegram", "text"):
-        telegram_provider = providers["openclaw_telegram"]
-    if telegram_provider.supports("telegram", "text"):
-        routes.append(("TELEGRAM", "telegram", telegram_provider))
+    if settings.telegram_enabled and "telegram_direct" in providers:
+        telegram_provider = providers["telegram_direct"]
+        if (
+            settings.telegram_uses_openclaw
+            and "openclaw_telegram" in providers
+            and providers["openclaw_telegram"].supports("telegram", "text")
+        ):
+            telegram_provider = providers["openclaw_telegram"]
+        if telegram_provider.supports("telegram", "text"):
+            routes.append(("TELEGRAM", "telegram", telegram_provider))
 
-    whatsapp_provider = providers["meta_whatsapp"]
-    if settings.openclaw_whatsapp_mode == "primary" and providers["openclaw_whatsapp"].supports("whatsapp", "text"):
-        whatsapp_provider = providers["openclaw_whatsapp"]
-    if whatsapp_provider.supports("whatsapp", "text"):
-        routes.append(("WHATSAPP", "whatsapp", whatsapp_provider))
+    if settings.whatsapp_enabled and "meta_whatsapp" in providers:
+        whatsapp_provider = providers["meta_whatsapp"]
+        if (
+            settings.openclaw_whatsapp_mode == "primary"
+            and "openclaw_whatsapp" in providers
+            and providers["openclaw_whatsapp"].supports("whatsapp", "text")
+        ):
+            whatsapp_provider = providers["openclaw_whatsapp"]
+        if whatsapp_provider.supports("whatsapp", "text"):
+            routes.append(("WHATSAPP", "whatsapp", whatsapp_provider))
 
     return routes
 
@@ -191,7 +224,14 @@ app.add_middleware(
     allow_origins=["*"] if settings.environment == "development" else ["https://dashboard.convertchain.com"],
     allow_credentials=True,
     allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type", "X-Service-Token", "Authorization", "X-Hub-Signature-256", "X-OpenClaw-Signature"],
+    allow_headers=[
+        "Content-Type",
+        "X-Service-Token",
+        "Authorization",
+        "X-Hub-Signature-256",
+        "X-OpenClaw-Signature",
+        "X-Telegram-Bot-Api-Secret-Token",
+    ],
 )
 
 
@@ -278,9 +318,10 @@ async def health_check() -> dict:
         "redis": redis_status,
         "openclaw": openclaw_status,
         "providers": {
-            "telegram": settings.telegram_provider,
-            "whatsapp_primary": settings.whatsapp_primary_provider,
-            "whatsapp_fallback": settings.whatsapp_fallback_provider,
+            "enabled_channels": sorted(settings.enabled_channel_set),
+            "telegram": settings.telegram_provider if settings.telegram_enabled else "disabled",
+            "whatsapp_primary": settings.whatsapp_primary_provider if settings.whatsapp_enabled else "disabled",
+            "whatsapp_fallback": settings.whatsapp_fallback_provider if settings.whatsapp_enabled else "disabled",
         },
         "timestamp": time.time(),
     }
@@ -297,6 +338,8 @@ async def whatsapp_verify(
     hub_verify_token: str | None = Query(default=None, alias="hub.verify_token"),
     hub_challenge: str | None = Query(default=None, alias="hub.challenge"),
 ):
+    if not settings.whatsapp_enabled:
+        raise HTTPException(status_code=404, detail="WhatsApp channel is disabled")
     if hub_mode != "subscribe":
         raise HTTPException(status_code=400, detail="Invalid hub.mode")
     if hub_verify_token != settings.whatsapp_verify_token:
@@ -311,6 +354,8 @@ async def whatsapp_webhook(
     runtime: MessageRuntime = Depends(get_runtime),
     replay_guard: ReplayGuard = Depends(get_replay_guard),
 ):
+    if not settings.whatsapp_enabled:
+        raise HTTPException(status_code=404, detail="WhatsApp channel is disabled")
     return await _process_provider_request(
         request,
         "meta_whatsapp",
@@ -327,6 +372,8 @@ async def telegram_webhook(
     runtime: MessageRuntime = Depends(get_runtime),
     replay_guard: ReplayGuard = Depends(get_replay_guard),
 ):
+    if not settings.telegram_enabled:
+        raise HTTPException(status_code=404, detail="Telegram channel is disabled")
     return await _process_provider_request(
         request,
         "telegram_direct",
@@ -343,6 +390,8 @@ async def openclaw_telegram_webhook(
     runtime: MessageRuntime = Depends(get_runtime),
     replay_guard: ReplayGuard = Depends(get_replay_guard),
 ):
+    if not settings.telegram_enabled:
+        raise HTTPException(status_code=404, detail="Telegram channel is disabled")
     if not settings.openclaw_inbound_secret:
         raise HTTPException(status_code=503, detail="OpenClaw inbound secret is not configured")
     return await _process_provider_request(
@@ -361,6 +410,8 @@ async def openclaw_whatsapp_webhook(
     runtime: MessageRuntime = Depends(get_runtime),
     replay_guard: ReplayGuard = Depends(get_replay_guard),
 ):
+    if not settings.whatsapp_enabled:
+        raise HTTPException(status_code=404, detail="WhatsApp channel is disabled")
     if not settings.openclaw_inbound_secret:
         raise HTTPException(status_code=503, detail="OpenClaw inbound secret is not configured")
     return await _process_provider_request(

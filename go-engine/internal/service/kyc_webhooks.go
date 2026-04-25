@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -42,7 +44,14 @@ func (s *ApplicationService) HandleSmileIDWebhook(ctx context.Context, payload [
 		eventType = "smileid.callback"
 	}
 
-	eventID, processed, err := s.ensureWebhookEvent(ctx, "smileid", eventType, payload, signature)
+	providerEventID := firstJSONString(raw,
+		[]string{"event_id"},
+		[]string{"eventId"},
+		[]string{"job_id"},
+		[]string{"jobId"},
+		[]string{"reference_id"},
+	)
+	eventID, processed, err := s.ensureWebhookEvent(ctx, "smileid", eventType, payload, signature, providerEventID)
 	if err != nil {
 		return err
 	}
@@ -107,7 +116,29 @@ func (s *ApplicationService) HandleSumsubWebhook(ctx context.Context, payload []
 		eventType = "sumsub.callback"
 	}
 
-	eventID, processed, err := s.ensureWebhookEvent(ctx, "sumsub", eventType, payload, digest)
+	providerEventID := firstJSONString(raw,
+		[]string{"correlationId"},
+		[]string{"eventId"},
+		[]string{"event_id"},
+		[]string{"id"},
+	)
+	if providerEventID == "" {
+		parts := []string{}
+		for _, part := range []string{
+			firstJSONString(raw, []string{"applicantId"}, []string{"applicant_id"}),
+			firstJSONString(raw, []string{"inspectionId"}, []string{"inspection_id"}),
+			firstJSONString(raw, []string{"createdAtMs"}, []string{"created_at_ms"}),
+			eventType,
+		} {
+			if strings.TrimSpace(part) != "" {
+				parts = append(parts, strings.TrimSpace(part))
+			}
+		}
+		if len(parts) > 1 {
+			providerEventID = strings.Join(parts, ":")
+		}
+	}
+	eventID, processed, err := s.ensureWebhookEvent(ctx, "sumsub", eventType, payload, digest, providerEventID)
 	if err != nil {
 		return err
 	}
@@ -125,13 +156,7 @@ func (s *ApplicationService) HandleSumsubWebhook(ctx context.Context, payload []
 		[]string{"applicant_id"},
 		[]string{"inspectionId"},
 	)
-	status := normalizeWebhookKYCStatus(firstJSONString(raw,
-		[]string{"reviewResult", "reviewAnswer"},
-		[]string{"review_result", "review_answer"},
-		[]string{"reviewStatus"},
-		[]string{"review_status"},
-		[]string{"status"},
-	))
+	status := normalizeSumsubKYCStatus(raw)
 	if status == "" {
 		status = "PENDING"
 	}
@@ -274,19 +299,38 @@ func (s *ApplicationService) findUserIDByProviderRef(ctx context.Context, provid
 	return userID, nil
 }
 
-func (s *ApplicationService) ensureWebhookEvent(ctx context.Context, source, eventType string, payload []byte, signature string) (uuid.UUID, bool, error) {
+func (s *ApplicationService) ensureWebhookEvent(ctx context.Context, source, eventType string, payload []byte, signature string, providerEventID string) (uuid.UUID, bool, error) {
 	var eventID uuid.UUID
 	var processed bool
+	payloadHash := sha256.Sum256(payload)
+	payloadSHA256 := hex.EncodeToString(payloadHash[:])
+	normalizedProviderEventID := strings.TrimSpace(providerEventID)
+
+	if normalizedProviderEventID != "" {
+		err := s.db.QueryRow(ctx, `
+        SELECT id, processed
+        FROM webhook_events
+        WHERE source = $1
+          AND provider_event_id = $2
+        ORDER BY created_at DESC
+        LIMIT 1
+    `, source, normalizedProviderEventID).Scan(&eventID, &processed)
+		if err == nil {
+			return eventID, processed, nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return uuid.Nil, false, err
+		}
+	}
 
 	err := s.db.QueryRow(ctx, `
         SELECT id, processed
         FROM webhook_events
         WHERE source = $1
-          AND event_type = $2
-          AND payload = $3::jsonb
+          AND payload_sha256 = $2
         ORDER BY created_at DESC
         LIMIT 1
-    `, source, eventType, string(payload)).Scan(&eventID, &processed)
+    `, source, payloadSHA256).Scan(&eventID, &processed)
 	if err == nil {
 		return eventID, processed, nil
 	}
@@ -295,15 +339,53 @@ func (s *ApplicationService) ensureWebhookEvent(ctx context.Context, source, eve
 	}
 
 	err = s.db.QueryRow(ctx, `
-        INSERT INTO webhook_events (source, event_type, payload, signature)
-        VALUES ($1, $2, $3::jsonb, NULLIF($4, ''))
+        INSERT INTO webhook_events (source, event_type, payload, signature, provider_event_id, payload_sha256)
+        VALUES ($1, $2, $3::jsonb, NULLIF($4, ''), NULLIF($5, ''), $6)
         RETURNING id, processed
-    `, source, eventType, string(payload), strings.TrimSpace(signature)).Scan(&eventID, &processed)
+    `, source, eventType, string(payload), strings.TrimSpace(signature), normalizedProviderEventID, payloadSHA256).Scan(&eventID, &processed)
 	if err != nil {
+		if strings.Contains(err.Error(), "webhook_events_source_provider_event") || strings.Contains(err.Error(), "webhook_events_source_payload_hash") {
+			err = s.db.QueryRow(ctx, `
+                SELECT id, processed
+                FROM webhook_events
+                WHERE source = $1
+                  AND (
+                    (provider_event_id IS NOT NULL AND provider_event_id = NULLIF($2, ''))
+                    OR payload_sha256 = $3
+                  )
+                ORDER BY created_at DESC
+                LIMIT 1
+            `, source, normalizedProviderEventID, payloadSHA256).Scan(&eventID, &processed)
+			if err == nil {
+				return eventID, processed, nil
+			}
+		}
 		return uuid.Nil, false, err
 	}
 
 	return eventID, processed, nil
+}
+
+func normalizeSumsubKYCStatus(raw map[string]any) string {
+	reviewAnswer := firstJSONString(raw,
+		[]string{"reviewResult", "reviewAnswer"},
+		[]string{"review_result", "review_answer"},
+	)
+	if reviewAnswer != "" {
+		return normalizeWebhookKYCStatus(reviewAnswer)
+	}
+
+	status := strings.ToUpper(strings.TrimSpace(firstJSONString(raw,
+		[]string{"reviewStatus"},
+		[]string{"review_status"},
+		[]string{"status"},
+	)))
+	switch status {
+	case "COMPLETED":
+		return "PENDING"
+	default:
+		return normalizeWebhookKYCStatus(status)
+	}
 }
 
 func (s *ApplicationService) markWebhookEventProcessed(ctx context.Context, eventID uuid.UUID, processErr error) error {

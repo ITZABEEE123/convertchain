@@ -45,6 +45,8 @@ func (s *SandboxBlockchainClient) CheckDeposit(_ context.Context, currency strin
 			AmountReceived: expectedAmount,
 			Confirmations:  1,
 			TxHash:         fmt.Sprintf("sandbox_tx_%s_%d", strings.ToLower(currency), checks),
+			Network:        "sandbox",
+			Address:        strings.TrimSpace(address),
 		}, nil
 	default:
 		return &workers.DepositResult{
@@ -52,6 +54,8 @@ func (s *SandboxBlockchainClient) CheckDeposit(_ context.Context, currency strin
 			AmountReceived: expectedAmount,
 			Confirmations:  required,
 			TxHash:         fmt.Sprintf("sandbox_tx_%s_%d", strings.ToLower(currency), checks),
+			Network:        "sandbox",
+			Address:        strings.TrimSpace(address),
 		}, nil
 	}
 }

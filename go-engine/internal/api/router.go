@@ -129,6 +129,11 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 			admin.GET("/disputes/:id", cfg.AdminHandler.GetDispute)
 			admin.POST("/disputes/:id/resolve", cfg.AdminHandler.ResolveDispute)
 			admin.GET("/providers/readiness", cfg.AdminHandler.GetProviderReadiness)
+			admin.GET("/compliance/cases", cfg.AdminHandler.ListAMLCases)
+			admin.GET("/compliance/cases/:id", cfg.AdminHandler.GetAMLCase)
+			admin.POST("/compliance/cases/:id/disposition", cfg.AdminHandler.DispositionAMLCase)
+			admin.POST("/compliance/legal-approvals", cfg.AdminHandler.RecordLegalLaunchApproval)
+			admin.POST("/compliance/data-protection/events", cfg.AdminHandler.RecordDataProtectionEvent)
 		}
 	}
 

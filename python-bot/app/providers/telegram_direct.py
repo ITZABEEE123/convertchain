@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 from typing import Any, Mapping
 
 import httpx
@@ -16,12 +17,17 @@ class TelegramDirectProvider:
     provider_name = "telegram_direct"
     channel = "telegram"
 
-    def __init__(self, bot_token: str):
+    def __init__(self, bot_token: str, webhook_secret: str | None = None, trusted_delivery: bool = False):
         self._api_base = f"{TELEGRAM_API_BASE}/bot{bot_token}"
+        self._webhook_secret = (webhook_secret or "").strip()
+        self._trusted_delivery = trusted_delivery
         self._http = httpx.AsyncClient(timeout=httpx.Timeout(30.0))
 
     async def verify_request(self, headers: Mapping[str, str], body: bytes) -> bool:
-        return True
+        if not self._webhook_secret:
+            return self._trusted_delivery
+        provided = headers.get("x-telegram-bot-api-secret-token") or headers.get("X-Telegram-Bot-Api-Secret-Token") or ""
+        return hmac.compare_digest(provided, self._webhook_secret)
 
     def parse_inbound(
         self,
@@ -60,7 +66,7 @@ class TelegramDirectProvider:
                         channel=self.channel,
                         user_id=chat_id,
                         sender_name=sender_name,
-                        message_id=str(message.get("message_id", "")),
+                        message_id=f"{chat_id}:{message.get('message_id', '')}",
                         text=text,
                         media_type=media_type,
                         media_id=media_id,
@@ -82,7 +88,7 @@ class TelegramDirectProvider:
                         channel=self.channel,
                         user_id=chat_id,
                         sender_name=sender_name,
-                        message_id=str(callback.get("id", "")),
+                        message_id=f"{chat_id}:callback:{callback.get('id', '')}",
                         text=str(callback.get("data", "")).strip(),
                         timestamp=str(callback.get("message", {}).get("date", "")) or None,
                         raw_payload=callback,

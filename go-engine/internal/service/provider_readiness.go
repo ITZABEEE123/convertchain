@@ -57,6 +57,10 @@ func (s *ApplicationService) preflightGraphPayout(ctx context.Context, payoutAmo
 		}
 	}
 
+	if s.graph.IsSandbox() && isSyntheticSandboxDestinationID(stringValuePointer(bankAccount.GraphDestID)) {
+		return nil
+	}
+
 	if _, err := s.graph.GetWalletAccountByCurrency(ctx, "NGN"); err != nil {
 		return &TradePreflightError{
 			Message: fmt.Sprintf("Trade cannot start because the Graph NGN wallet account is unavailable: %v", err),
@@ -163,27 +167,44 @@ func (s *ApplicationService) GetProviderReadiness(ctx context.Context) (*domain.
 	report.Graph = s.graphReadiness(ctx)
 	report.Binance = s.exchangeReadiness(ctx, s.primaryExchange, true, []string{"BTC", "ETH", "BNB"})
 	report.Bybit = s.exchangeReadiness(ctx, s.fallbackExchange, s.options.BybitFallbackEnabled, []string{"BTC", "ETH", "BNB"})
+	primaryKYCProvider := normalizeKYCProvider(s.options.KYCPrimaryProvider)
 	report.SmileID = domain.ProviderReadinessCheck{
 		Enabled: s.kycOrchestrator != nil && s.kycOrchestrator.SupportsTier1(),
 		Healthy: s.kycOrchestrator != nil && s.kycOrchestrator.SupportsTier1(),
-		Summary: readinessSummary(s.kycOrchestrator != nil && s.kycOrchestrator.SupportsTier1(), "SmileID credentials are configured.", "SmileID credentials are missing or incomplete."),
+		Summary: readinessSummary(s.kycOrchestrator != nil && s.kycOrchestrator.SupportsTier1(), "SmileID credentials are configured.", "SmileID credentials are missing or incomplete. This is non-blocking when KYC_PRIMARY_PROVIDER=sumsub."),
 		Details: map[string]interface{}{
-			"tier": "TIER_1",
+			"tier":    "TIER_1",
+			"primary": primaryKYCProvider == "smile_id",
 		},
 	}
+	sumsubEnabled := s.kycOrchestrator != nil && s.kycOrchestrator.SupportsSumsub()
+	sumsubWebhookReady := strings.TrimSpace(s.options.SumsubWebhookSecret) != ""
+	sumsubModeSafe := s.options.Environment != "production" || !s.options.SumsubUseSandbox
 	report.Sumsub = domain.ProviderReadinessCheck{
-		Enabled: s.kycOrchestrator != nil && s.kycOrchestrator.SupportsTier2(),
-		Healthy: s.kycOrchestrator != nil && s.kycOrchestrator.SupportsTier2(),
-		Summary: readinessSummary(s.kycOrchestrator != nil && s.kycOrchestrator.SupportsTier2(), "Sumsub credentials are configured.", "Sumsub credentials are missing or incomplete."),
+		Enabled: sumsubEnabled,
+		Healthy: sumsubEnabled && sumsubWebhookReady && sumsubModeSafe,
+		Summary: sumsubReadinessSummary(sumsubEnabled, sumsubWebhookReady, sumsubModeSafe),
 		Details: map[string]interface{}{
-			"tier": "TIER_2_PLUS",
+			"tier":                            "TIER_1_PLUS",
+			"primary":                         primaryKYCProvider == "sumsub",
+			"sandbox":                         s.options.SumsubUseSandbox,
+			"webhook_secret_configured":       sumsubWebhookReady,
+			"public_webhook_base_url":         strings.TrimSpace(s.options.SumsubWebhookPublicBaseURL),
+			"recommended_webhook_destination": sumsubWebhookDestinationURL(s.options.SumsubWebhookPublicBaseURL),
+			"tier1_level":                     s.sumsubLevelNameForTier("TIER_1"),
+			"tier2_level":                     s.sumsubLevelNameForTier("TIER_2"),
+			"tier3_level":                     s.sumsubLevelNameForTier("TIER_3"),
+			"tier4_level":                     s.sumsubLevelNameForTier("TIER_4"),
 		},
 	}
 
+	kycHealthy := report.SmileID.Healthy
+	if primaryKYCProvider == "sumsub" {
+		kycHealthy = report.Sumsub.Healthy
+	}
 	report.OverallHealthy = report.Graph.Healthy &&
 		report.Binance.Healthy &&
-		report.SmileID.Healthy &&
-		report.Sumsub.Healthy &&
+		kycHealthy &&
 		(!report.Bybit.Enabled || report.Bybit.Healthy)
 
 	return report, nil
@@ -311,6 +332,27 @@ func graphWebhookDestinationURL(base string) string {
 		return ""
 	}
 	return trimmed + "/webhooks/graph"
+}
+
+func sumsubWebhookDestinationURL(base string) string {
+	trimmed := strings.TrimRight(strings.TrimSpace(base), "/")
+	if trimmed == "" {
+		return ""
+	}
+	return trimmed + "/webhooks/kyc/sumsub"
+}
+
+func sumsubReadinessSummary(enabled, webhookReady, modeSafe bool) string {
+	switch {
+	case !enabled:
+		return "Sumsub credentials are missing or incomplete."
+	case !modeSafe:
+		return "Sumsub is configured for sandbox mode while production mode requires production Sumsub credentials."
+	case !webhookReady:
+		return "Sumsub API credentials are configured, but the webhook secret is missing."
+	default:
+		return "Sumsub credentials, webhook secret, and environment mode are ready."
+	}
 }
 
 func readinessSummary(healthy bool, okMessage string, badMessage string) string {
