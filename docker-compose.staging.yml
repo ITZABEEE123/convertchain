@@ -1,0 +1,23 @@
+services:
+  go-engine:
+    restart: unless-stopped
+    environment:
+      ENVIRONMENT: staging
+      AUTO_APPROVE_KYC: "false"
+      GRAPH_USE_SANDBOX: "${GRAPH_USE_SANDBOX:-true}"
+      BINANCE_USE_TESTNET: "${BINANCE_USE_TESTNET:-true}"
+      BYBIT_USE_TESTNET: "${BYBIT_USE_TESTNET:-true}"
+
+  python-bot:
+    restart: unless-stopped
+    environment:
+      ENVIRONMENT: staging
+
+  postgres:
+    restart: unless-stopped
+
+  redis:
+    restart: unless-stopped
+
+  vault:
+    restart: unless-stopped

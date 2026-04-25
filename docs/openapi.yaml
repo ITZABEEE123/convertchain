@@ -1,0 +1,739 @@
+openapi: "3.1.0"
+info:
+  title: ConvertChain Go Engine — Internal API
+  version: "1.0.0"
+  description: |
+    Internal API contract for the ConvertChain Go engine.
+    All monetary values are integer minor units (kobo for NGN; satoshis for BTC;
+    wei for ETH; micro-units for USDT/USDC; 8-decimal minor units for BNB).
+    No floating-point values are persisted or accepted for money fields.
+
+    Authentication:
+    - Service endpoints: X-Service-Token header (required)
+    - Admin endpoints:   X-Admin-Token header (required)
+    - Webhook endpoints: X-Graph-Signature-256 HMAC-SHA256 + X-Graph-Event-Id
+
+servers:
+  - url: http://localhost:8080
+    description: Local Docker sandbox
+
+tags:
+  - name: trades
+    description: Trade lifecycle (user-authorised)
+  - name: quotes
+    description: Price quotes
+  - name: security
+    description: Transaction password management
+  - name: webhooks
+    description: Provider webhook callbacks
+  - name: admin
+    description: Administrative operations
+  - name: observability
+    description: Health, readiness, and metrics
+
+# ── Security schemes ──────────────────────────────────────────────────────────
+components:
+  securitySchemes:
+    ServiceToken:
+      type: apiKey
+      in: header
+      name: X-Service-Token
+    AdminToken:
+      type: apiKey
+      in: header
+      name: X-Admin-Token
+    GraphWebhookSignature:
+      type: apiKey
+      in: header
+      name: X-Graph-Signature-256
+
+  schemas:
+
+    # ── Error envelope ─────────────────────────────────────────────────────
+    ErrorResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: Machine-readable error code
+          enum:
+            - ERR_VALIDATION
+            - ERR_INTERNAL
+            - ERR_NOT_FOUND
+            - ERR_UNAUTHORIZED
+            - ERR_FORBIDDEN
+            - ERR_RATE_LIMITED
+            - ERR_KYC_NOT_APPROVED
+            - ERR_QUOTE_EXPIRED
+            - ERR_QUOTE_USED
+            - ERR_TRANSACTION_PASSWORD_NOT_SET
+            - ERR_TRANSACTION_PASSWORD_INVALID
+            - ERR_TRANSACTION_PASSWORD_LOCKED
+            - ERR_TRADE_PREFLIGHT_FAILED
+            - ERR_AMOUNT_TOO_SMALL
+            - ERR_TIER_LIMIT_EXCEEDED
+            - ERR_ENDPOINT_DEPRECATED
+            - ERR_WEBHOOK_INVALID_SIGNATURE
+            - ERR_WEBHOOK_REPLAY
+            - ERR_WEBHOOK_MISSING_EVENT_ID
+        message:
+          type: string
+        details:
+          nullable: true
+
+    # ── Quote ──────────────────────────────────────────────────────────────
+    QuoteRequest:
+      type: object
+      required: [user_id, asset, amount]
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        asset:
+          type: string
+          enum: [BTC, ETH, USDT, USDC, BNB]
+        amount:
+          type: string
+          description: Decimal string in whole asset units (e.g. "0.25"). Parsed server-side.
+          example: "0.25"
+        direction:
+          type: string
+          enum: [sell, SELL]
+          default: sell
+
+    QuoteResponse:
+      type: object
+      properties:
+        quote_id:
+          type: string
+          format: uuid
+        asset:
+          type: string
+        amount:
+          type: string
+        rate:
+          type: integer
+          format: int64
+          description: "Alias for user_rate_per_unit_kobo (kobo per asset unit)"
+        fee_kobo:
+          type: integer
+          format: int64
+        net_naira_kobo:
+          type: integer
+          format: int64
+        gross_naira_kobo:
+          type: integer
+          format: int64
+        platform_fee_kobo:
+          type: integer
+          format: int64
+        platform_fee_bps:
+          type: integer
+        market_rate_per_unit_kobo:
+          type: integer
+          format: int64
+        user_rate_per_unit_kobo:
+          type: integer
+          format: int64
+        pricing_mode:
+          type: string
+        price_source:
+          type: string
+        fiat_rate_source:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum: [QUOTE_PROVIDED, QUOTE_ACCEPTED, QUOTE_EXPIRED]
+
+    # ── Trade ──────────────────────────────────────────────────────────────
+    CreateTradeRequest:
+      type: object
+      required: [user_id, quote_id, bank_account_id]
+      description: >
+        DEPRECATED. Internal service use only (requires X-Service-Token).
+        End-users must use ConfirmTradeRequest via POST /api/v1/trades/confirm.
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        quote_id:
+          type: string
+          format: uuid
+        bank_account_id:
+          type: string
+          format: uuid
+
+    ConfirmTradeRequest:
+      type: object
+      required: [user_id, quote_id, bank_account_id, transaction_password]
+      description: Canonical user-authorised trade creation. Always requires transaction_password.
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        quote_id:
+          type: string
+          format: uuid
+        bank_account_id:
+          type: string
+          format: uuid
+        transaction_password:
+          type: string
+          format: password
+          description: Argon2id-verified transaction password set by the user.
+
+    TradeResponse:
+      type: object
+      properties:
+        trade_id:
+          type: string
+          format: uuid
+        trade_ref:
+          type: string
+          example: "TRD-ABCD1234"
+        user_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum:
+            - PENDING_DEPOSIT
+            - DEPOSIT_RECEIVED
+            - DEPOSIT_CONFIRMED
+            - CONVERSION_IN_PROGRESS
+            - CONVERSION_COMPLETED
+            - PAYOUT_PENDING
+            - PAYOUT_COMPLETED
+            - PAYOUT_FAILED
+            - DISPUTE
+            - DISPUTE_CLOSED
+            - EXPIRED
+            - CANCELLED
+        deposit_address:
+          type: string
+        deposit_amount:
+          type: string
+        asset:
+          type: string
+        net_amount_kobo:
+          type: integer
+          format: int64
+        fee_amount_kobo:
+          type: integer
+          format: int64
+        bank_name:
+          type: string
+        masked_account_number:
+          type: string
+        payout_authorized_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        tx_hash:
+          type: string
+        payout_ref:
+          type: string
+        confirmations:
+          type: integer
+        required_confirmations:
+          type: integer
+
+    # ── Webhook envelopes ──────────────────────────────────────────────────
+    GraphWebhookEnvelope:
+      type: object
+      required: [event_id, event_type, timestamp, data]
+      properties:
+        event_id:
+          type: string
+          description: Provider-assigned UUID used as the idempotency key.
+        event_type:
+          type: string
+          enum: [payout.completed, payout.failed, payout.pending]
+        timestamp:
+          type: string
+          format: date-time
+        data:
+          oneOf:
+            - $ref: "#/components/schemas/GraphPayoutEventData"
+
+    GraphPayoutEventData:
+      type: object
+      required: [payout_id, trade_ref, status, amount_kobo]
+      properties:
+        payout_id:
+          type: string
+          description: Graph provider payout reference
+        trade_ref:
+          type: string
+          description: ConvertChain trade reference (e.g. TRD-ABCD1234)
+        status:
+          type: string
+        amount_kobo:
+          type: integer
+          format: int64
+          description: Settled Naira amount in integer kobo (minor units)
+        fail_reason:
+          type: string
+          nullable: true
+
+    # ── Bot callback ───────────────────────────────────────────────────────
+    BotCallbackRequest:
+      type: object
+      description: >
+        Payload sent by the Python bot to engine service endpoints.
+        The bot is a pure channel gateway — it forwards user intent and
+        credentials; all financial logic executes in the Go engine.
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        session_id:
+          type: string
+        action:
+          type: string
+          enum: [confirm_trade, get_status, cancel]
+        payload:
+          type: object
+          description: Action-specific payload; see individual endpoint schemas.
+
+# ── Paths ─────────────────────────────────────────────────────────────────────
+paths:
+
+  /health:
+    get:
+      tags: [observability]
+      summary: Liveness probe
+      description: Returns 200 if the process is alive. No dependency checks.
+      responses:
+        "200":
+          description: Process alive
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  ts:
+                    type: string
+                    format: date-time
+
+  /ready:
+    get:
+      tags: [observability]
+      summary: Readiness probe
+      description: Returns 200 if the engine is ready to serve requests (DB connected).
+      responses:
+        "200":
+          description: Ready
+        "503":
+          description: Not ready
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /metrics:
+    get:
+      tags: [observability]
+      summary: Prometheus metrics
+      description: >
+        Returns Prometheus text-format metrics. Should be accessible only to
+        the Prometheus scraper CIDR in production (protect at ingress level).
+      responses:
+        "200":
+          description: Prometheus text format
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /api/v1/quotes:
+    post:
+      tags: [quotes]
+      summary: Create a price quote
+      description: |
+        Generates a deterministic quote for the given asset and amount.
+
+        **Contract:**
+        - User must have KYC status APPROVED.
+        - Amount is a decimal string; engine parses to integer minor units.
+        - Amount must be ≥ per-asset minimum.
+        - Amount must be ≤ per-KYC-tier maximum.
+        - Quote TTL is 5 minutes; after expiry the quote cannot be used to confirm a trade.
+        - Rate-limited to 10 requests/minute per IP.
+      security:
+        - ServiceToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/QuoteRequest"
+      responses:
+        "201":
+          description: Quote created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuoteResponse"
+        "400":
+          description: Invalid request body (ERR_VALIDATION)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Missing or invalid X-Service-Token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: KYC not approved (ERR_KYC_NOT_APPROVED)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: |
+            Amount validation failure:
+            - ERR_AMOUNT_TOO_SMALL — below per-asset minimum
+            - ERR_TIER_LIMIT_EXCEEDED — above per-KYC-tier maximum
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Rate limit exceeded (ERR_RATE_LIMITED)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/trades:
+    post:
+      tags: [trades]
+      summary: "[DEPRECATED] Create trade (internal use only)"
+      description: |
+        **DEPRECATED** — returns `Deprecation: true` and `Sunset: 2026-12-31` headers.
+
+        Restricted to internal service callers with a valid X-Service-Token.
+        Cannot create payout-bound trades for end-users; use
+        `POST /api/v1/trades/confirm` instead.
+
+        Requests without X-Service-Token return 410 Gone with ERR_ENDPOINT_DEPRECATED.
+      deprecated: true
+      security:
+        - ServiceToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTradeRequest"
+      responses:
+        "201":
+          description: Trade created (service-token callers only)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TradeResponse"
+        "401":
+          description: Missing X-Service-Token
+        "403":
+          description: KYC not approved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "410":
+          description: Endpoint deprecated — called without X-Service-Token (ERR_ENDPOINT_DEPRECATED)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/trades/confirm:
+    post:
+      tags: [trades]
+      summary: Confirm trade (canonical user-authorised path)
+      description: |
+        **Canonical trade creation endpoint.**
+
+        Verifies the user's transaction password (Argon2id) before atomically
+        consuming the quote and creating the trade. Every trade that routes to
+        payout must pass through this endpoint.
+
+        The bot gateway calls this after the user supplies their transaction
+        password in the chat session.
+      security:
+        - ServiceToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConfirmTradeRequest"
+      responses:
+        "201":
+          description: Trade created and payout authorised
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TradeResponse"
+        "400":
+          description: ERR_VALIDATION
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Missing X-Service-Token
+        "403":
+          description: |
+            ERR_KYC_NOT_APPROVED or ERR_TRANSACTION_PASSWORD_INVALID
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: ERR_NOT_FOUND (quote not found)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: |
+            ERR_QUOTE_USED, ERR_TRANSACTION_PASSWORD_NOT_SET,
+            or ERR_TRADE_PREFLIGHT_FAILED
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "410":
+          description: ERR_QUOTE_EXPIRED
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "423":
+          description: ERR_TRANSACTION_PASSWORD_LOCKED
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/trades/{trade_id}:
+    get:
+      tags: [trades]
+      summary: Get trade by ID
+      security:
+        - ServiceToken: []
+      parameters:
+        - name: trade_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Trade found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TradeResponse"
+        "404":
+          description: ERR_NOT_FOUND
+
+  /api/v1/trades/{trade_id}/receipt:
+    get:
+      tags: [trades]
+      summary: Get trade receipt
+      security:
+        - ServiceToken: []
+      parameters:
+        - name: trade_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Receipt found
+        "404":
+          description: ERR_NOT_FOUND
+
+  /api/v1/users/{user_id}/trades/active:
+    get:
+      tags: [trades]
+      summary: Get latest active trade for user
+      security:
+        - ServiceToken: []
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Active trade found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TradeResponse"
+        "404":
+          description: No active trade
+
+  /api/v1/users/{user_id}/trades/context:
+    get:
+      tags: [trades]
+      summary: Get trade status context (bot polling endpoint)
+      security:
+        - ServiceToken: []
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Context found
+        "404":
+          description: No context found
+
+  /webhooks/graph:
+    post:
+      tags: [webhooks]
+      summary: Graph provider webhook callback
+      description: |
+        Receives lifecycle events from the Graph payout provider.
+
+        **Middleware chain (enforced before handler):**
+        1. `GraphWebhookAuth` — verifies HMAC-SHA256 signature in X-Graph-Signature-256.
+        2. `WebhookReplayProtection` — Redis SET NX dedup on X-Graph-Event-Id (24h TTL).
+        3. Handler — Postgres-level secondary dedup via webhook_events table.
+
+        **Idempotency:** A duplicate event_id returns 200 `{status: "duplicate"}` without state mutation.
+      security:
+        - GraphWebhookSignature: []
+      parameters:
+        - name: X-Graph-Event-Id
+          in: header
+          required: true
+          schema:
+            type: string
+          description: Provider-assigned unique event ID (idempotency key)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GraphWebhookEnvelope"
+      responses:
+        "200":
+          description: Event processed or already processed (idempotent)
+        "400":
+          description: ERR_VALIDATION or ERR_WEBHOOK_MISSING_EVENT_ID
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: ERR_WEBHOOK_INVALID_SIGNATURE
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/admin/trades:
+    get:
+      tags: [admin]
+      summary: List trades (admin)
+      security:
+        - AdminToken: []
+      responses:
+        "200":
+          description: Trade list
+        "401":
+          description: Missing X-Admin-Token
+
+  /api/v1/admin/trades/{trade_id}/dispute:
+    post:
+      tags: [admin]
+      summary: Raise dispute on a trade (admin)
+      security:
+        - AdminToken: []
+      parameters:
+        - name: trade_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Dispute raised
+        "401":
+          description: Missing X-Admin-Token
+
+  /api/v1/admin/trades/{trade_id}/resolve:
+    post:
+      tags: [admin]
+      summary: Resolve a trade dispute (admin)
+      security:
+        - AdminToken: []
+      parameters:
+        - name: trade_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Dispute resolved
+        "401":
+          description: Missing X-Admin-Token
+
+  /api/v1/admin/trades/{trade_id}/status:
+    post:
+      tags: [admin]
+      summary: Force-update trade status (admin)
+      description: >
+        Admin-only endpoint to manually advance a stuck trade.
+        Extension point for role separation: AdminToken middleware can be
+        upgraded to role-aware JWT without changing route declarations.
+      security:
+        - AdminToken: []
+      parameters:
+        - name: trade_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Status updated
+        "401":
+          description: Missing X-Admin-Token
