@@ -82,7 +82,7 @@ func TestBTCBlockstreamAdapterParsesConfirmedDeposit(t *testing.T) {
 	}
 }
 
-func TestEVMUSDCAdapterParsesTransferLog(t *testing.T) {
+func TestEVMTokenAdapterParsesTransferLog(t *testing.T) {
 	const address = "0x1111111111111111111111111111111111111111"
 	const contract = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
 	const amountHex = "0x17d7840"
@@ -113,7 +113,8 @@ func TestEVMUSDCAdapterParsesTransferLog(t *testing.T) {
 	}))
 	defer server.Close()
 
-	adapter := &EVMUSDCAdapter{
+	adapter := &EVMTokenAdapter{
+		asset:           "USDC",
 		network:         "ethereum",
 		rpcURL:          server.URL,
 		contractAddress: contract,

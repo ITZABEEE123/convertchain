@@ -120,6 +120,7 @@ def onboarded_session():
         ("sell 0.25 BTC", "BTC"),
         ("sell 1 ETH", "ETH"),
         ("SELL 100 USDT", "USDT"),
+        ("sell 0.1 BNB", "BNB"),
         ("sell 0.001 btc", "BTC"),
     ],
 )
@@ -356,3 +357,11 @@ def test_kobo_to_naira_conversion():
     assert TradeFlow._kobo_to_naira_str(163762348750) == "₦1,637,623,487.50"
     assert TradeFlow._kobo_to_naira_str(50) == "₦0.50"
     assert TradeFlow._kobo_to_naira_str(0) == "₦0.00"
+
+
+def test_format_deposit_destination_hides_internal_network_prefix():
+    result = TradeFlow._format_deposit_destination("USDC", "polygon:0xabc")
+
+    assert "Polygon" in result
+    assert "`0xabc`" in result
+    assert "polygon:0xabc" not in result

@@ -42,6 +42,41 @@ func DefaultDepositPolicySet() DepositPolicySet {
 		FinalityConfirmations:  64,
 		AmountToleranceMinor:   0,
 	})
+	set.Put(DepositConfirmationPolicy{
+		Currency:               "ETH",
+		Network:                "ethereum",
+		DetectionConfirmations: 1,
+		FinalityConfirmations:  12,
+		AmountToleranceMinor:   0,
+	})
+	set.Put(DepositConfirmationPolicy{
+		Currency:               "BNB",
+		Network:                "bsc",
+		DetectionConfirmations: 1,
+		FinalityConfirmations:  20,
+		AmountToleranceMinor:   0,
+	})
+	set.Put(DepositConfirmationPolicy{
+		Currency:               "USDT",
+		Network:                "ethereum",
+		DetectionConfirmations: 1,
+		FinalityConfirmations:  12,
+		AmountToleranceMinor:   0,
+	})
+	set.Put(DepositConfirmationPolicy{
+		Currency:               "USDT",
+		Network:                "polygon",
+		DetectionConfirmations: 1,
+		FinalityConfirmations:  64,
+		AmountToleranceMinor:   0,
+	})
+	set.Put(DepositConfirmationPolicy{
+		Currency:               "USDT",
+		Network:                "bsc",
+		DetectionConfirmations: 1,
+		FinalityConfirmations:  20,
+		AmountToleranceMinor:   0,
+	})
 	return set
 }
 
@@ -50,6 +85,11 @@ func NewDepositPolicySetFromEnv() DepositPolicySet {
 	set.overrideFromEnv("BTC", "btc", "BTC_DEPOSIT_DETECTION_CONFIRMATIONS", "BTC_DEPOSIT_FINALITY_CONFIRMATIONS", "BTC_DEPOSIT_AMOUNT_TOLERANCE_MINOR")
 	set.overrideFromEnv("USDC", "ethereum", "USDC_ETH_DEPOSIT_DETECTION_CONFIRMATIONS", "USDC_ETH_DEPOSIT_FINALITY_CONFIRMATIONS", "USDC_ETH_DEPOSIT_AMOUNT_TOLERANCE_MINOR")
 	set.overrideFromEnv("USDC", "polygon", "USDC_POLYGON_DEPOSIT_DETECTION_CONFIRMATIONS", "USDC_POLYGON_DEPOSIT_FINALITY_CONFIRMATIONS", "USDC_POLYGON_DEPOSIT_AMOUNT_TOLERANCE_MINOR")
+	set.overrideFromEnv("ETH", "ethereum", "ETH_DEPOSIT_DETECTION_CONFIRMATIONS", "ETH_DEPOSIT_FINALITY_CONFIRMATIONS", "ETH_DEPOSIT_AMOUNT_TOLERANCE_MINOR")
+	set.overrideFromEnv("BNB", "bsc", "BNB_BSC_DEPOSIT_DETECTION_CONFIRMATIONS", "BNB_BSC_DEPOSIT_FINALITY_CONFIRMATIONS", "BNB_BSC_DEPOSIT_AMOUNT_TOLERANCE_MINOR")
+	set.overrideFromEnv("USDT", "ethereum", "USDT_ETH_DEPOSIT_DETECTION_CONFIRMATIONS", "USDT_ETH_DEPOSIT_FINALITY_CONFIRMATIONS", "USDT_ETH_DEPOSIT_AMOUNT_TOLERANCE_MINOR")
+	set.overrideFromEnv("USDT", "polygon", "USDT_POLYGON_DEPOSIT_DETECTION_CONFIRMATIONS", "USDT_POLYGON_DEPOSIT_FINALITY_CONFIRMATIONS", "USDT_POLYGON_DEPOSIT_AMOUNT_TOLERANCE_MINOR")
+	set.overrideFromEnv("USDT", "bsc", "USDT_BSC_DEPOSIT_DETECTION_CONFIRMATIONS", "USDT_BSC_DEPOSIT_FINALITY_CONFIRMATIONS", "USDT_BSC_DEPOSIT_AMOUNT_TOLERANCE_MINOR")
 	return set
 }
 
@@ -117,8 +157,16 @@ func parseExpectedDepositNetworkAndAddress(currency, depositAddress string) (str
 	switch currency {
 	case "BTC":
 		return "btc", trimmed
-	case "USDC":
+	case "ETH":
 		return "ethereum", trimmed
+	case "BNB":
+		return "bsc", trimmed
+	case "USDC", "USDT":
+		network := normalizeNetworkName(os.Getenv(currency + "_DEPOSIT_NETWORK"))
+		if network == "" || network == "default" {
+			network = "ethereum"
+		}
+		return network, trimmed
 	default:
 		return "default", trimmed
 	}
@@ -135,6 +183,8 @@ func normalizeNetworkName(raw string) string {
 		return "ethereum"
 	case "matic", "polygon", "polygon-pos":
 		return "polygon"
+	case "bsc", "bnb", "bnb-smart-chain", "binance-smart-chain", "bep20":
+		return "bsc"
 	case "sandbox":
 		return "sandbox"
 	default:

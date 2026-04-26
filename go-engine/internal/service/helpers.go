@@ -59,9 +59,9 @@ func userStatusToClient(status string) string {
 
 func assetDecimals(asset string) int {
 	switch strings.ToUpper(asset) {
-	case "BTC", "BNB":
+	case "BTC":
 		return 8
-	case "ETH":
+	case "ETH", "BNB":
 		return 18
 	case "USDT", "USDC":
 		return 6

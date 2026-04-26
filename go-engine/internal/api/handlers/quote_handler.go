@@ -113,12 +113,10 @@ func deriveQuoteStatus(quote *domain.Quote) string {
 func formatAmountForClient(amount int64, currency string) string {
 	decimals := 8
 	switch currency {
-	case "ETH":
+	case "ETH", "BNB":
 		decimals = 18
 	case "USDC", "USDT":
 		decimals = 6
-	case "BNB":
-		decimals = 8
 	}
 
 	divisor := 1.0

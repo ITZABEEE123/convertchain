@@ -19,15 +19,16 @@ import (
 )
 
 const (
-	erc20TransferTopic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55aeb"
+	erc20TransferTopic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 )
 
 type ProductionBlockchainClient struct {
-	logger       *slog.Logger
-	httpClient   *http.Client
-	fallback     *SandboxBlockchainClient
-	btcAdapter   *BTCBlockstreamAdapter
-	usdcAdapters map[string]*EVMUSDCAdapter
+	logger     *slog.Logger
+	httpClient *http.Client
+	fallback   *SandboxBlockchainClient
+	btcAdapter *BTCBlockstreamAdapter
+	nativeEVM  map[string]*EVMNativeAdapter
+	tokenEVM   map[string]map[string]*EVMTokenAdapter
 }
 
 func NewBlockchainClientFromEnv(logger *slog.Logger) workers.BlockchainClient {
@@ -42,10 +43,11 @@ func NewBlockchainClientFromEnv(logger *slog.Logger) workers.BlockchainClient {
 	}
 
 	client := &ProductionBlockchainClient{
-		logger:       logger,
-		httpClient:   &http.Client{Timeout: 20 * time.Second},
-		fallback:     NewSandboxBlockchainClient(),
-		usdcAdapters: map[string]*EVMUSDCAdapter{},
+		logger:     logger,
+		httpClient: &http.Client{Timeout: 20 * time.Second},
+		fallback:   NewSandboxBlockchainClient(),
+		nativeEVM:  map[string]*EVMNativeAdapter{},
+		tokenEVM:   map[string]map[string]*EVMTokenAdapter{},
 	}
 
 	btcBase := strings.TrimSpace(os.Getenv("BTC_BLOCKSTREAM_API_BASE_URL"))
@@ -54,25 +56,19 @@ func NewBlockchainClientFromEnv(logger *slog.Logger) workers.BlockchainClient {
 	}
 	client.btcAdapter = &BTCBlockstreamAdapter{baseURL: strings.TrimRight(btcBase, "/"), httpClient: client.httpClient}
 
-	if rpc := strings.TrimSpace(os.Getenv("USDC_ETH_RPC_URL")); rpc != "" {
-		contract := strings.TrimSpace(os.Getenv("USDC_ETH_CONTRACT"))
-		if contract == "" {
-			contract = "0xA0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
-		}
-		client.usdcAdapters["ethereum"] = &EVMUSDCAdapter{network: "ethereum", rpcURL: rpc, contractAddress: strings.ToLower(contract), httpClient: client.httpClient, lookbackBlocks: envInt64("DEPOSIT_BACKFILL_LOOKBACK_BLOCKS", 9000)}
-	}
-	if rpc := strings.TrimSpace(os.Getenv("USDC_POLYGON_RPC_URL")); rpc != "" {
-		contract := strings.TrimSpace(os.Getenv("USDC_POLYGON_CONTRACT"))
-		if contract == "" {
-			contract = "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359"
-		}
-		client.usdcAdapters["polygon"] = &EVMUSDCAdapter{network: "polygon", rpcURL: rpc, contractAddress: strings.ToLower(contract), httpClient: client.httpClient, lookbackBlocks: envInt64("DEPOSIT_BACKFILL_LOOKBACK_BLOCKS", 9000)}
-	}
+	client.configureNativeEVM("ETH", "ethereum", "ETH_ETH_RPC_URL", "ETH_RPC_URL", "USDC_ETH_RPC_URL")
+	client.configureNativeEVM("BNB", "bsc", "BNB_BSC_RPC_URL", "BSC_RPC_URL", "USDT_BSC_RPC_URL")
 
-	if len(client.usdcAdapters) == 0 {
-		logger.Warn("production blockchain monitor enabled but no USDC adapters configured")
+	client.configureTokenEVM("USDC", "ethereum", "USDC_ETH_RPC_URL", "ETH_RPC_URL", "0xA0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", "USDC_ETH_CONTRACT")
+	client.configureTokenEVM("USDC", "polygon", "USDC_POLYGON_RPC_URL", "POLYGON_RPC_URL", "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359", "USDC_POLYGON_CONTRACT")
+	client.configureTokenEVM("USDT", "ethereum", "USDT_ETH_RPC_URL", "ETH_RPC_URL", "0xdAC17F958D2ee523a2206206994597C13D831ec7", "USDT_ETH_CONTRACT")
+	client.configureTokenEVM("USDT", "polygon", "USDT_POLYGON_RPC_URL", "POLYGON_RPC_URL", "0xc2132D05D31c914a87C6611C10748AEb04B58e8F", "USDT_POLYGON_CONTRACT")
+	client.configureTokenEVM("USDT", "bsc", "USDT_BSC_RPC_URL", "BSC_RPC_URL", "0x55d398326f99059fF775485246999027B3197955", "USDT_BSC_CONTRACT")
+
+	if len(client.tokenEVM) == 0 && len(client.nativeEVM) == 0 {
+		logger.Warn("production blockchain monitor enabled but no EVM adapters configured")
 	}
-	logger.Info("using production blockchain monitor", "btc_adapter", client.btcAdapter != nil, "usdc_networks", len(client.usdcAdapters))
+	logger.Info("using production blockchain monitor", "btc_adapter", client.btcAdapter != nil, "native_evm_networks", len(client.nativeEVM), "token_assets", len(client.tokenEVM))
 	return client
 }
 
@@ -96,13 +92,21 @@ func (c *ProductionBlockchainClient) CheckDeposit(ctx context.Context, currency 
 		}
 		result.Network = "btc"
 		return result, nil
-	case "USDC":
-		adapter := c.usdcAdapters[network]
+	case "ETH", "BNB":
+		adapter := c.nativeEVM[network]
 		if adapter == nil {
-			adapter = c.usdcAdapters["ethereum"]
+			return nil, fmt.Errorf("%s adapter not configured for network %s", strings.ToLower(currency), network)
 		}
+		result, err := adapter.CheckAddressDeposit(ctx, rawAddress)
+		if err != nil {
+			return nil, err
+		}
+		result.Network = adapter.network
+		return result, nil
+	case "USDC", "USDT":
+		adapter := c.tokenAdapter(currency, network)
 		if adapter == nil {
-			return nil, fmt.Errorf("usdc adapter not configured for network %s", network)
+			return nil, fmt.Errorf("%s adapter not configured for network %s", strings.ToLower(currency), network)
 		}
 		result, err := adapter.CheckAddressDeposit(ctx, rawAddress)
 		if err != nil {
@@ -113,6 +117,71 @@ func (c *ProductionBlockchainClient) CheckDeposit(ctx context.Context, currency 
 	default:
 		return &workers.DepositResult{Found: false}, nil
 	}
+}
+
+func (c *ProductionBlockchainClient) configureNativeEVM(asset, network string, rpcKeys ...string) {
+	rpc := firstNonEmptyEnv(rpcKeys...)
+	if rpc == "" {
+		return
+	}
+	c.nativeEVM[normalizeNetworkName(network)] = &EVMNativeAdapter{
+		asset:          strings.ToUpper(strings.TrimSpace(asset)),
+		network:        normalizeNetworkName(network),
+		rpcURL:         rpc,
+		httpClient:     c.httpClient,
+		lookbackBlocks: envInt64(strings.ToUpper(strings.TrimSpace(asset))+"_"+networkEnvPrefix(network)+"_DEPOSIT_LOOKBACK_BLOCKS", envInt64(strings.ToUpper(strings.TrimSpace(asset))+"_DEPOSIT_LOOKBACK_BLOCKS", envInt64("DEPOSIT_BACKFILL_LOOKBACK_BLOCKS", 9000))),
+	}
+}
+
+func (c *ProductionBlockchainClient) configureTokenEVM(asset, network string, primaryRPCKey string, fallbackRPCKey string, defaultContract string, contractKey string) {
+	rpc := firstNonEmptyEnv(primaryRPCKey, fallbackRPCKey)
+	if rpc == "" {
+		return
+	}
+	asset = strings.ToUpper(strings.TrimSpace(asset))
+	network = normalizeNetworkName(network)
+	contract := firstNonEmptyEnv(contractKey)
+	if contract == "" {
+		contract = defaultContract
+	}
+	if c.tokenEVM[asset] == nil {
+		c.tokenEVM[asset] = map[string]*EVMTokenAdapter{}
+	}
+	c.tokenEVM[asset][network] = &EVMTokenAdapter{
+		asset:           asset,
+		network:         network,
+		rpcURL:          rpc,
+		contractAddress: strings.ToLower(contract),
+		httpClient:      c.httpClient,
+		lookbackBlocks:  envInt64(asset+"_"+networkEnvPrefix(network)+"_DEPOSIT_LOOKBACK_BLOCKS", envInt64("DEPOSIT_BACKFILL_LOOKBACK_BLOCKS", 9000)),
+	}
+}
+
+func networkEnvPrefix(network string) string {
+	switch normalizeNetworkName(network) {
+	case "ethereum":
+		return "ETH"
+	case "polygon":
+		return "POLYGON"
+	case "bsc":
+		return "BSC"
+	case "btc":
+		return "BTC"
+	default:
+		return strings.ToUpper(strings.TrimSpace(network))
+	}
+}
+
+func (c *ProductionBlockchainClient) tokenAdapter(asset, network string) *EVMTokenAdapter {
+	asset = strings.ToUpper(strings.TrimSpace(asset))
+	network = normalizeNetworkName(network)
+	if c.tokenEVM[asset] == nil {
+		return nil
+	}
+	if adapter := c.tokenEVM[asset][network]; adapter != nil {
+		return adapter
+	}
+	return c.tokenEVM[asset]["ethereum"]
 }
 
 func parseTaggedNetworkAddress(currency, address string) (string, string) {
@@ -131,8 +200,16 @@ func parseTaggedNetworkAddress(currency, address string) (string, string) {
 	switch currency {
 	case "BTC":
 		return "btc", trimmed
-	case "USDC":
+	case "ETH":
 		return "ethereum", trimmed
+	case "BNB":
+		return "bsc", trimmed
+	case "USDC", "USDT":
+		network := normalizeNetworkName(os.Getenv(currency + "_DEPOSIT_NETWORK"))
+		if network == "" || network == "default" {
+			network = "ethereum"
+		}
+		return network, trimmed
 	default:
 		return "default", trimmed
 	}
@@ -147,6 +224,8 @@ func normalizeNetworkName(raw string) string {
 		return "ethereum"
 	case "polygon", "matic", "polygon-pos":
 		return "polygon"
+	case "bsc", "bnb", "bnb-smart-chain", "binance-smart-chain", "bep20":
+		return "bsc"
 	default:
 		return value
 	}
@@ -291,7 +370,16 @@ func (b *BTCBlockstreamAdapter) fetchTipHeight(ctx context.Context) (int64, erro
 	return value, nil
 }
 
-type EVMUSDCAdapter struct {
+type EVMNativeAdapter struct {
+	asset          string
+	network        string
+	rpcURL         string
+	httpClient     *http.Client
+	lookbackBlocks int64
+}
+
+type EVMTokenAdapter struct {
+	asset           string
 	network         string
 	rpcURL          string
 	contractAddress string
@@ -325,7 +413,16 @@ type evmLog struct {
 	Removed         bool     `json:"removed"`
 }
 
-func (a *EVMUSDCAdapter) CheckAddressDeposit(ctx context.Context, address string) (*workers.DepositResult, error) {
+type evmBlock struct {
+	Number       string `json:"number"`
+	Transactions []struct {
+		Hash  string `json:"hash"`
+		To    string `json:"to"`
+		Value string `json:"value"`
+	} `json:"transactions"`
+}
+
+func (a *EVMNativeAdapter) CheckAddressDeposit(ctx context.Context, address string) (*workers.DepositResult, error) {
 	normalizedAddress := strings.ToLower(strings.TrimSpace(address))
 	if normalizedAddress == "" {
 		return &workers.DepositResult{Found: false, Network: a.network}, nil
@@ -334,7 +431,75 @@ func (a *EVMUSDCAdapter) CheckAddressDeposit(ctx context.Context, address string
 		normalizedAddress = "0x" + normalizedAddress
 	}
 
-	latestBlock, err := a.blockNumber(ctx)
+	latestBlock, err := evmBlockNumber(ctx, a.rpcURL, a.httpClient)
+	if err != nil {
+		return nil, err
+	}
+	fromBlock := latestBlock - a.lookbackBlocks
+	if fromBlock < 0 {
+		fromBlock = 0
+	}
+
+	var bestHash string
+	var bestAmount *big.Int
+	bestBlock := int64(-1)
+	for blockNumber := latestBlock; blockNumber >= fromBlock; blockNumber-- {
+		var block evmBlock
+		if err := evmCallRPC(ctx, a.rpcURL, a.httpClient, "eth_getBlockByNumber", []interface{}{fmt.Sprintf("0x%x", blockNumber), true}, &block); err != nil {
+			return nil, err
+		}
+		for _, tx := range block.Transactions {
+			if !strings.EqualFold(strings.TrimSpace(tx.To), normalizedAddress) {
+				continue
+			}
+			amount := hexToBigInt(tx.Value)
+			if amount.Sign() <= 0 {
+				continue
+			}
+			bestHash = strings.TrimSpace(tx.Hash)
+			bestAmount = amount
+			bestBlock = blockNumber
+			break
+		}
+		if bestHash != "" {
+			break
+		}
+	}
+
+	if bestHash == "" || bestAmount == nil {
+		return &workers.DepositResult{Found: false, Network: a.network, Address: normalizedAddress}, nil
+	}
+	if !bestAmount.IsInt64() {
+		return nil, fmt.Errorf("%s amount overflow for tx %s", strings.ToLower(a.asset), bestHash)
+	}
+	confirmations := int(latestBlock - bestBlock + 1)
+	if confirmations < 0 {
+		confirmations = 0
+	}
+
+	return &workers.DepositResult{
+		Found:          true,
+		AmountReceived: bestAmount.Int64(),
+		Confirmations:  confirmations,
+		TxHash:         bestHash,
+		Network:        a.network,
+		Address:        normalizedAddress,
+		ReorgRisk:      confirmations == 0,
+		Reversed:       false,
+		Replaced:       false,
+	}, nil
+}
+
+func (a *EVMTokenAdapter) CheckAddressDeposit(ctx context.Context, address string) (*workers.DepositResult, error) {
+	normalizedAddress := strings.ToLower(strings.TrimSpace(address))
+	if normalizedAddress == "" {
+		return &workers.DepositResult{Found: false, Network: a.network}, nil
+	}
+	if !strings.HasPrefix(normalizedAddress, "0x") {
+		normalizedAddress = "0x" + normalizedAddress
+	}
+
+	latestBlock, err := evmBlockNumber(ctx, a.rpcURL, a.httpClient)
 	if err != nil {
 		return nil, err
 	}
@@ -352,7 +517,7 @@ func (a *EVMUSDCAdapter) CheckAddressDeposit(ctx context.Context, address string
 	}}
 
 	var logs []evmLog
-	if err := a.callRPC(ctx, "eth_getLogs", params, &logs); err != nil {
+	if err := evmCallRPC(ctx, a.rpcURL, a.httpClient, "eth_getLogs", params, &logs); err != nil {
 		return nil, err
 	}
 	if len(logs) == 0 {
@@ -376,7 +541,7 @@ func (a *EVMUSDCAdapter) CheckAddressDeposit(ctx context.Context, address string
 
 	amount := hexToBigInt(best.Data)
 	if !amount.IsInt64() {
-		return nil, fmt.Errorf("usdc amount overflow for tx %s", best.TransactionHash)
+		return nil, fmt.Errorf("%s amount overflow for tx %s", strings.ToLower(a.asset), best.TransactionHash)
 	}
 
 	return &workers.DepositResult{
@@ -392,28 +557,28 @@ func (a *EVMUSDCAdapter) CheckAddressDeposit(ctx context.Context, address string
 	}, nil
 }
 
-func (a *EVMUSDCAdapter) blockNumber(ctx context.Context) (int64, error) {
+func evmBlockNumber(ctx context.Context, rpcURL string, httpClient *http.Client) (int64, error) {
 	var blockHex string
-	if err := a.callRPC(ctx, "eth_blockNumber", []interface{}{}, &blockHex); err != nil {
+	if err := evmCallRPC(ctx, rpcURL, httpClient, "eth_blockNumber", []interface{}{}, &blockHex); err != nil {
 		return 0, err
 	}
 	return hexToInt64(blockHex), nil
 }
 
-func (a *EVMUSDCAdapter) callRPC(ctx context.Context, method string, params interface{}, result interface{}) error {
+func evmCallRPC(ctx context.Context, rpcURL string, httpClient *http.Client, method string, params interface{}, result interface{}) error {
 	payload := rpcRequest{JSONRPC: "2.0", Method: method, Params: params, ID: 1}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.rpcURL, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rpcURL, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := a.httpClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return err
 	}

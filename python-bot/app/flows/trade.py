@@ -313,10 +313,9 @@ class TradeFlow:
         return (
             "Trade confirmed.\n\n"
             f"Trade ID: `{trade_id}`\n\n"
-            "Send your crypto to:\n"
-            f"`{deposit_address}`\n\n"
+            f"{self._format_deposit_destination(asset, deposit_address)}\n\n"
             f"Amount: *{deposit_amount} {asset}*\n\n"
-            "Send exactly that amount to the deposit address above.\n"
+            "Send exactly that amount using the network shown above.\n"
             f"Once your deposit is confirmed, *{net_naira}* will be sent to your bank account.\n\n"
             "Type *status* to track the trade."
         )
@@ -511,6 +510,52 @@ class TradeFlow:
     def _kobo_to_naira_str(kobo: int) -> str:
         naira = Decimal(kobo) / Decimal("100")
         return f"\u20A6{naira:,.2f}"
+
+    @staticmethod
+    def _format_deposit_destination(asset: str, deposit_address: str) -> str:
+        network, address = TradeFlow._split_deposit_destination(asset, deposit_address)
+        label = TradeFlow._network_label(network)
+        return (
+            "*Deposit destination*\n"
+            f"- Asset: *{asset}*\n"
+            f"- Network: *{label}*\n"
+            f"- Address:\n`{address}`\n\n"
+            f"Important: send only on *{label}*. Wrong-network deposits require manual review."
+        )
+
+    @staticmethod
+    def _split_deposit_destination(asset: str, deposit_address: str) -> tuple[str, str]:
+        value = str(deposit_address or "").strip()
+        if value.startswith("sandbox://"):
+            return "sandbox", value
+        if ":" in value:
+            maybe_network, maybe_address = value.split(":", 1)
+            if maybe_network and maybe_address:
+                return maybe_network.strip().lower(), maybe_address.strip()
+        asset_upper = str(asset or "").upper()
+        if asset_upper == "BTC":
+            return "btc", value
+        if asset_upper == "BNB":
+            return "bsc", value
+        return "ethereum", value
+
+    @staticmethod
+    def _network_label(network: str) -> str:
+        normalized = str(network or "").strip().lower()
+        labels = {
+            "btc": "Bitcoin",
+            "bitcoin": "Bitcoin",
+            "ethereum": "Ethereum / ERC20",
+            "eth": "Ethereum / ERC20",
+            "erc20": "Ethereum / ERC20",
+            "polygon": "Polygon",
+            "matic": "Polygon",
+            "bsc": "BNB Smart Chain / BEP20",
+            "bnb": "BNB Smart Chain / BEP20",
+            "bep20": "BNB Smart Chain / BEP20",
+            "sandbox": "Sandbox",
+        }
+        return labels.get(normalized, normalized or "Configured network")
 
     @staticmethod
     def _transaction_password_prompt_expired(trade_data: dict) -> bool:

@@ -181,13 +181,13 @@ func (e *PricingEngine) GetQuote(ctx context.Context, req QuoteRequest) (*QuoteR
 	fromAmountF := new(big.Float).SetInt64(req.FromAmount)
 
 	// Determine the minor-unit divisor for the source currency
-	// BTC: 1e8 (satoshis), ETH: 1e18 (wei), USDC/USDT: 1e6 (micro-units)
+	// BTC: 1e8 (satoshis), ETH/BNB: 1e18 (wei), USDC/USDT: 1e6 (micro-units)
 	var divisor *big.Float
 	switch req.FromCurrency {
 	case "BTC":
 		divisor = big.NewFloat(1e8) // 100,000,000 satoshis per BTC
-	case "ETH":
-		divisor = big.NewFloat(1e18) // 1e18 wei per ETH
+	case "ETH", "BNB":
+		divisor = big.NewFloat(1e18) // 1e18 wei per ETH/BNB
 	case "USDC", "USDT":
 		divisor = big.NewFloat(1e6) // 1,000,000 micro-units per USDC
 	default:
@@ -370,9 +370,9 @@ func ratePerUnitKobo(totalKobo int64, fromAmount int64, currency string) int64 {
 
 func currencyDivisor(currency string) int64 {
 	switch currency {
-	case "BTC", "BNB":
+	case "BTC":
 		return 100_000_000
-	case "ETH":
+	case "ETH", "BNB":
 		return 1_000_000_000_000_000_000
 	case "USDT", "USDC":
 		return 1_000_000
