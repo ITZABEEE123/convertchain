@@ -204,10 +204,10 @@ func main() {
 			SumsubWebhookSecret:        sumsubWebhookSecret,
 			SumsubWebhookPublicBaseURL: sumsubWebhookPublicBaseURL,
 			SumsubUseSandbox:           sumsubUseSandbox,
-			SumsubTier1LevelName:       firstNonEmpty(strings.TrimSpace(os.Getenv("SUMSUB_TIER1_LEVEL_NAME")), "telegram-tier1"),
-			SumsubTier2LevelName:       firstNonEmpty(strings.TrimSpace(os.Getenv("SUMSUB_TIER2_LEVEL_NAME")), "telegram-tier2"),
-			SumsubTier3LevelName:       firstNonEmpty(strings.TrimSpace(os.Getenv("SUMSUB_TIER3_LEVEL_NAME")), "telegram-tier3"),
-			SumsubTier4LevelName:       firstNonEmpty(strings.TrimSpace(os.Getenv("SUMSUB_TIER4_LEVEL_NAME")), "telegram-tier4"),
+			SumsubTier1LevelName:       envWithDevDefault("SUMSUB_TIER1_LEVEL_NAME", "telegram-tier1", environment),
+			SumsubTier2LevelName:       envWithDevDefault("SUMSUB_TIER2_LEVEL_NAME", "telegram-tier2", environment),
+			SumsubTier3LevelName:       envWithDevDefault("SUMSUB_TIER3_LEVEL_NAME", "telegram-tier3", environment),
+			SumsubTier4LevelName:       envWithDevDefault("SUMSUB_TIER4_LEVEL_NAME", "telegram-tier4", environment),
 			SumsubWebSDKLinkTTLSeconds: sumsubWebSDKLinkTTLSeconds,
 			GraphWebhookSecret:         graphWebhookSecret,
 			GraphWebhookPublicBaseURL:  graphWebhookPublicBaseURL,
@@ -369,6 +369,17 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func envWithDevDefault(key, fallback, environment string) string {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value != "" {
+		return value
+	}
+	if strings.EqualFold(strings.TrimSpace(environment), "production") {
+		return ""
+	}
+	return fallback
 }
 
 func envBool(key string, fallback bool) bool {

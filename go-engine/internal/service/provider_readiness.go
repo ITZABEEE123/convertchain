@@ -180,15 +180,20 @@ func (s *ApplicationService) GetProviderReadiness(ctx context.Context) (*domain.
 	sumsubEnabled := s.kycOrchestrator != nil && s.kycOrchestrator.SupportsSumsub()
 	sumsubWebhookReady := strings.TrimSpace(s.options.SumsubWebhookSecret) != ""
 	sumsubModeSafe := s.options.Environment != "production" || !s.options.SumsubUseSandbox
+	sumsubTier1LevelReady := strings.TrimSpace(s.sumsubLevelNameForTier("TIER_1")) != ""
+	sumsubTTLReady := s.options.SumsubWebSDKLinkTTLSeconds > 0
 	report.Sumsub = domain.ProviderReadinessCheck{
 		Enabled: sumsubEnabled,
-		Healthy: sumsubEnabled && sumsubWebhookReady && sumsubModeSafe,
-		Summary: sumsubReadinessSummary(sumsubEnabled, sumsubWebhookReady, sumsubModeSafe),
+		Healthy: sumsubEnabled && sumsubWebhookReady && sumsubModeSafe && sumsubTier1LevelReady && sumsubTTLReady,
+		Summary: sumsubReadinessSummary(sumsubEnabled, sumsubWebhookReady, sumsubModeSafe, sumsubTier1LevelReady, sumsubTTLReady),
 		Details: map[string]interface{}{
 			"tier":                            "TIER_1_PLUS",
 			"primary":                         primaryKYCProvider == "sumsub",
 			"sandbox":                         s.options.SumsubUseSandbox,
 			"webhook_secret_configured":       sumsubWebhookReady,
+			"tier1_level_configured":          sumsubTier1LevelReady,
+			"websdk_link_ttl_seconds":         s.options.SumsubWebSDKLinkTTLSeconds,
+			"websdk_link_ttl_valid":           sumsubTTLReady,
 			"public_webhook_base_url":         strings.TrimSpace(s.options.SumsubWebhookPublicBaseURL),
 			"recommended_webhook_destination": sumsubWebhookDestinationURL(s.options.SumsubWebhookPublicBaseURL),
 			"tier1_level":                     s.sumsubLevelNameForTier("TIER_1"),
@@ -342,7 +347,7 @@ func sumsubWebhookDestinationURL(base string) string {
 	return trimmed + "/webhooks/kyc/sumsub"
 }
 
-func sumsubReadinessSummary(enabled, webhookReady, modeSafe bool) string {
+func sumsubReadinessSummary(enabled, webhookReady, modeSafe, tier1LevelReady, ttlReady bool) string {
 	switch {
 	case !enabled:
 		return "Sumsub credentials are missing or incomplete."
@@ -350,8 +355,12 @@ func sumsubReadinessSummary(enabled, webhookReady, modeSafe bool) string {
 		return "Sumsub is configured for sandbox mode while production mode requires production Sumsub credentials."
 	case !webhookReady:
 		return "Sumsub API credentials are configured, but the webhook secret is missing."
+	case !tier1LevelReady:
+		return "Sumsub API credentials are configured, but SUMSUB_TIER1_LEVEL_NAME is missing."
+	case !ttlReady:
+		return "Sumsub API credentials are configured, but SUMSUB_WEBSDK_LINK_TTL_SECONDS must be greater than zero."
 	default:
-		return "Sumsub credentials, webhook secret, and environment mode are ready."
+		return "Sumsub credentials, webhook secret, level names, TTL, and environment mode are ready."
 	}
 }
 

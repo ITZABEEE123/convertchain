@@ -310,6 +310,125 @@ async def test_collect_bvn_starts_sumsub_link_flow(
 
 
 @pytest.mark.asyncio
+async def test_collect_bvn_submits_go_kyc_payload_shape(
+    onboarding_flow,
+    mock_session_service,
+    mock_engine_client,
+):
+    await mock_session_service.set("+2348012345678", {
+        "flow": "onboarding",
+        "step": "COLLECT_BVN",
+        "engine_user_id": "11111111-1111-1111-1111-111111111111",
+        "channel": "telegram",
+        "data": {
+            "phone": "+2348012345678",
+            "first_name": "John",
+            "last_name": "Doe",
+            "date_of_birth": "1990-01-15",
+            "nin": "12345678901",
+        },
+    })
+
+    session = await mock_session_service.get("+2348012345678")
+    await onboarding_flow.handle_step(
+        user_id="+2348012345678",
+        session=session,
+        text="22345678901",
+        image_id=None,
+    )
+
+    payload = mock_engine_client.submit_kyc.await_args.args[0]
+    assert payload == {
+        "user_id": "11111111-1111-1111-1111-111111111111",
+        "first_name": "John",
+        "last_name": "Doe",
+        "date_of_birth": "1990-01-15",
+        "phone_number": "+2348012345678",
+        "nin": "12345678901",
+        "bvn": "22345678901",
+    }
+
+
+@pytest.mark.asyncio
+async def test_collect_bvn_provider_configuration_error_is_safe_for_user(
+    onboarding_flow,
+    mock_session_service,
+    mock_engine_client,
+):
+    mock_engine_client.submit_kyc = AsyncMock(
+        side_effect=EngineError(
+            "Engine returned 502: KYC provider is not configured",
+            status_code=502,
+            code="PROVIDER_CONFIGURATION_ERROR",
+        )
+    )
+
+    await mock_session_service.set("+2348012345678", {
+        "flow": "onboarding",
+        "step": "COLLECT_BVN",
+        "engine_user_id": "11111111-1111-1111-1111-111111111111",
+        "channel": "telegram",
+        "data": {
+            "phone": "+2348012345678",
+            "first_name": "John",
+            "last_name": "Doe",
+            "date_of_birth": "1990-01-15",
+            "nin": "12345678901",
+        },
+    })
+
+    session = await mock_session_service.get("+2348012345678")
+    result = await onboarding_flow.handle_step(
+        user_id="+2348012345678",
+        session=session,
+        text="22345678901",
+        image_id=None,
+    )
+
+    assert "temporarily unavailable" in result.lower()
+    assert "sumsub" not in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_collect_bvn_retries_after_user_not_found(
+    onboarding_flow,
+    mock_session_service,
+    mock_engine_client,
+):
+    mock_engine_client.create_user = AsyncMock(return_value={"user_id": "22222222-2222-2222-2222-222222222222"})
+    mock_engine_client.submit_kyc = AsyncMock(side_effect=[
+        EngineError("Engine returned 404: User not found", status_code=404, code="USER_NOT_FOUND"),
+        {"kyc_id": "kyc_test456", "status": "pending"},
+    ])
+
+    await mock_session_service.set("+2348012345678", {
+        "flow": "onboarding",
+        "step": "COLLECT_BVN",
+        "engine_user_id": "11111111-1111-1111-1111-111111111111",
+        "channel": "telegram",
+        "data": {
+            "phone": "+2348012345678",
+            "first_name": "John",
+            "last_name": "Doe",
+            "date_of_birth": "1990-01-15",
+            "nin": "12345678901",
+        },
+    })
+
+    session = await mock_session_service.get("+2348012345678")
+    await onboarding_flow.handle_step(
+        user_id="+2348012345678",
+        session=session,
+        text="22345678901",
+        image_id=None,
+    )
+
+    assert mock_engine_client.submit_kyc.await_count == 2
+    retry_payload = mock_engine_client.submit_kyc.await_args.args[0]
+    assert retry_payload["user_id"] == "22222222-2222-2222-2222-222222222222"
+
+
+@pytest.mark.asyncio
 async def test_confirm_transaction_password_reports_final_setup_step(
     onboarding_flow,
     mock_session_service,

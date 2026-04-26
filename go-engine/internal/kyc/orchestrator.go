@@ -2,13 +2,17 @@ package kyc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 
 	"convert-chain/go-engine/internal/kyc/smileid"
 	"convert-chain/go-engine/internal/kyc/sumsub"
 )
+
+var sensitiveNumberPattern = regexp.MustCompile(`\+?\d[\d\s-]{5,}\d`)
 
 type KYCOrchestrator struct {
 	smileID *smileid.Client
@@ -228,9 +232,10 @@ func (o *KYCOrchestrator) SubmitSumsubKYC(ctx context.Context, req SumsubKYCRequ
 	}
 	levelName := strings.TrimSpace(req.LevelName)
 	if levelName == "" {
-		levelName = "telegram-tier1"
+		return nil, fmt.Errorf("sumsub level name is required")
 	}
 
+	o.logSumsubStage("sumsub_create_applicant_started", req.UserID.String(), levelName)
 	applicant, err := o.sumsub.CreateApplicant(ctx, sumsub.ApplicantRequest{
 		ExternalUserID: req.UserID.String(),
 		LevelName:      levelName,
@@ -241,9 +246,12 @@ func (o *KYCOrchestrator) SubmitSumsubKYC(ctx context.Context, req SumsubKYCRequ
 		PhoneNumber:    req.PhoneNumber,
 	})
 	if err != nil {
+		o.logSumsubFailure("sumsub_create_applicant_failed", req.UserID.String(), levelName, err)
 		return nil, fmt.Errorf("create sumsub applicant failed: %w", err)
 	}
+	o.logSumsubStage("sumsub_create_applicant_succeeded", req.UserID.String(), levelName)
 
+	o.logSumsubStage("sumsub_websdk_link_started", req.UserID.String(), levelName)
 	link, err := o.sumsub.CreateWebSDKLink(ctx, sumsub.WebSDKLinkRequest{
 		UserID:      req.UserID.String(),
 		LevelName:   levelName,
@@ -252,8 +260,10 @@ func (o *KYCOrchestrator) SubmitSumsubKYC(ctx context.Context, req SumsubKYCRequ
 		TTLInSecs:   req.TTLInSecs,
 	})
 	if err != nil {
+		o.logSumsubFailure("sumsub_websdk_link_failed", req.UserID.String(), levelName, err)
 		return nil, fmt.Errorf("create sumsub websdk link failed: %w", err)
 	}
+	o.logSumsubStage("sumsub_websdk_link_succeeded", req.UserID.String(), levelName)
 
 	return &KYCResult{
 		Status:          "PENDING",
@@ -264,4 +274,52 @@ func (o *KYCOrchestrator) SubmitSumsubKYC(ctx context.Context, req SumsubKYCRequ
 		LevelName:       levelName,
 		VerificationURL: link.URL,
 	}, nil
+}
+
+func (o *KYCOrchestrator) logSumsubStage(stage string, userID string, levelName string) {
+	if o == nil || o.logger == nil {
+		return
+	}
+	o.logger.Info(
+		stage,
+		"stage", stage,
+		"user_id", userID,
+		"provider", "sumsub",
+		"level_name", levelName,
+	)
+}
+
+func (o *KYCOrchestrator) logSumsubFailure(stage string, userID string, levelName string, err error) {
+	if o == nil || o.logger == nil {
+		return
+	}
+	args := []interface{}{
+		"stage", stage,
+		"user_id", userID,
+		"provider", "sumsub",
+		"level_name", levelName,
+	}
+	var providerErr *sumsub.ProviderError
+	if errors.As(err, &providerErr) {
+		args = append(args,
+			"provider_status_code", providerErr.StatusCode,
+			"provider_error_code", providerErr.Code,
+			"provider_error_message", safeProviderErrorMessage(providerErr.Message),
+		)
+	} else {
+		args = append(args, "error", err)
+	}
+	o.logger.Warn(stage, args...)
+}
+
+func safeProviderErrorMessage(message string) string {
+	safe := strings.TrimSpace(message)
+	if safe == "" {
+		return ""
+	}
+	safe = sensitiveNumberPattern.ReplaceAllString(safe, "<redacted-number>")
+	if len(safe) > 240 {
+		return safe[:240] + "..."
+	}
+	return safe
 }

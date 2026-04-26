@@ -131,7 +131,7 @@ func (c *Client) CreateApplicant(ctx context.Context, req ApplicantRequest) (*Ap
 
 	levelName := strings.TrimSpace(req.LevelName)
 	if levelName == "" {
-		levelName = "telegram-tier2"
+		return nil, &ProviderError{Operation: "create_applicant", Code: "SUMSUB_LEVEL_NAME_MISSING", Message: "sumsub levelName is required"}
 	}
 
 	bodyPayload := map[string]any{
@@ -205,7 +205,7 @@ func (c *Client) CreateWebSDKLink(ctx context.Context, req WebSDKLinkRequest) (*
 
 	levelName := strings.TrimSpace(req.LevelName)
 	if levelName == "" {
-		levelName = "telegram-tier1"
+		return nil, &ProviderError{Operation: "create_websdk_link", Code: "SUMSUB_LEVEL_NAME_MISSING", Message: "sumsub levelName is required"}
 	}
 	ttl := req.TTLInSecs
 	if ttl <= 0 {

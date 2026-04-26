@@ -463,10 +463,43 @@ class OnboardingFlow:
             "bvn": bvn,
         }
 
+        log.info(
+            "Submitting KYC payload",
+            user_id=session.get("engine_user_id"),
+            payload_keys=sorted(kyc_payload.keys()),
+        )
+
+        kyc_result = None
         try:
             kyc_result = await self._engine.submit_kyc(kyc_payload)
-            kyc_id = kyc_result.get("kyc_id")
         except EngineError as e:
+            if e.status_code == 404 or str(e.code or "").upper() == "USER_NOT_FOUND":
+                try:
+                    user_result = await self._engine.create_user(
+                        channel_type=self._channel,
+                        channel_user_id=user_id,
+                    )
+                    recovered_engine_user_id = user_result.get("user_id") or user_result.get("id")
+                    if not recovered_engine_user_id:
+                        raise EngineError("Engine create_user returned no user id")
+                    session["engine_user_id"] = recovered_engine_user_id
+                    kyc_payload["user_id"] = recovered_engine_user_id
+                    await self._session.set(user_id, session)
+                    log.info(
+                        "Retrying KYC after user re-resolution",
+                        user_id=recovered_engine_user_id,
+                        payload_keys=sorted(kyc_payload.keys()),
+                    )
+                    kyc_result = await self._engine.submit_kyc(kyc_payload)
+                except EngineError as retry_error:
+                    log.error(
+                        "KYC submission failed after user re-resolution",
+                        error_code=retry_error.code,
+                        status_code=retry_error.status_code,
+                        user_id=session.get("engine_user_id"),
+                    )
+                    return self._kyc_error_message(retry_error)
+
             if e.status_code == 409:
                 try:
                     kyc_status_result = await self._engine.get_kyc_status(session["engine_user_id"])
@@ -493,13 +526,16 @@ class OnboardingFlow:
                             recovered=True,
                         )
 
-            log.error("KYC submission failed", error=str(e), user_id=session.get("engine_user_id"))
-            return (
-                "KYC submission failed.\n\n"
-                "We could not verify your information at this time.\n"
-                "Please try again in a few minutes.\n\n"
-                "If this keeps happening, please contact support@convertchain.com"
-            )
+            if kyc_result is None:
+                log.error(
+                    "KYC submission failed",
+                    error_code=e.code,
+                    status_code=e.status_code,
+                    user_id=session.get("engine_user_id"),
+                )
+                return self._kyc_error_message(e)
+
+        kyc_id = kyc_result.get("kyc_id")
 
         immediate_status = str(kyc_result.get("status") or "").upper()
         immediate_reason = (
@@ -848,6 +884,40 @@ class OnboardingFlow:
             "  - delete account\n\n"
             "Help\n"
             "  - help"
+        )
+
+    @staticmethod
+    def _kyc_error_message(exc: EngineError) -> str:
+        code = str(exc.code or "").upper()
+        if exc.status_code == 400 or code == "VALIDATION_ERROR":
+            return (
+                "Some verification details look missing or invalid.\n\n"
+                "Please type *hi* to restart KYC and carefully review your name, date of birth, NIN, and BVN."
+            )
+        if exc.status_code == 404 or code == "USER_NOT_FOUND":
+            return (
+                "We could not find your account setup in the engine.\n\n"
+                "Please type *hi* to restart account setup."
+            )
+        if exc.status_code == 409 or code == "DUPLICATE_KYC_SUBMISSION":
+            return (
+                "Your KYC submission already exists.\n\n"
+                "Please type *status* to continue checking your verification."
+            )
+        if exc.status_code == 502 or code in {
+            "PROVIDER_CONFIGURATION_ERROR",
+            "PROVIDER_AUTH_FAILED",
+            "PROVIDER_ERROR",
+        }:
+            return (
+                "Verification service is temporarily unavailable.\n\n"
+                "Please try again later."
+            )
+        return (
+            "KYC submission failed.\n\n"
+            "We could not verify your information at this time.\n"
+            "Please try again in a few minutes.\n\n"
+            "If this keeps happening, please contact support@convertchain.com"
         )
 
     def _parse_date(self, text: str) -> date | None:

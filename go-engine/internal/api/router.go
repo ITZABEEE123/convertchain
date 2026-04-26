@@ -38,6 +38,8 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 	if cfg.HealthHandler != nil {
 		engine.GET("/health", cfg.HealthHandler.Health)
 		engine.GET("/ready", cfg.HealthHandler.Ready)
+		engine.HEAD("/health", cfg.HealthHandler.Health)
+		engine.HEAD("/ready", cfg.HealthHandler.Ready)
 	}
 
 	if cfg.ProviderWebhookHandler != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -17,19 +18,33 @@ import (
 )
 
 func (s *ApplicationService) submitKYCWorkflow(ctx context.Context, req dto.KYCSubmitRequest) (*domain.KYCStatusSummary, error) {
+	s.logKYCSubmitStage("kyc_submit_received", req.UserID)
+	s.logKYCSubmitStage("kyc_submit_validation_passed", req.UserID)
+	s.logKYCSubmitStage("kyc_user_lookup_started", req.UserID)
+
 	user, err := s.getUserByID(ctx, req.UserID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, errors.New("user_not_found")
+			s.logKYCSubmitStage("kyc_user_lookup_failed", req.UserID, "reason", "not_found")
+			return nil, userNotFoundKYCError(err)
 		}
+		s.logKYCSubmitStage("kyc_user_lookup_failed", req.UserID, "reason", "db_error")
 		return nil, err
 	}
+	s.logKYCSubmitStage("kyc_user_lookup_succeeded", req.UserID)
 
 	tier := normalizeKYCTier(req.Tier)
+	var summary *domain.KYCStatusSummary
 	if tier == "TIER_1" {
-		return s.submitTier1KYC(ctx, user, req)
+		summary, err = s.submitTier1KYC(ctx, user, req)
+	} else {
+		summary, err = s.submitTier2PlusKYC(ctx, user, req, tier)
 	}
-	return s.submitTier2PlusKYC(ctx, user, req, tier)
+	if err != nil {
+		return nil, err
+	}
+	s.logKYCSubmitStage("kyc_submit_completed", req.UserID, "tier", tier)
+	return summary, nil
 }
 
 func (s *ApplicationService) submitTier1KYC(ctx context.Context, user *domain.User, req dto.KYCSubmitRequest) (*domain.KYCStatusSummary, error) {
@@ -68,9 +83,12 @@ func (s *ApplicationService) submitTier1KYC(ctx context.Context, user *domain.Us
 		result.Status = "PENDING"
 	}
 
+	s.logKYCSubmitStage("kyc_record_upsert_started", req.UserID)
 	if err := s.persistTier1KYCOutcome(ctx, &workingCopy, req, phone, result); err != nil {
+		s.logKYCSubmitStage("kyc_record_upsert_failed", req.UserID, "reason", "db_error")
 		return nil, err
 	}
+	s.logKYCSubmitStage("kyc_record_upsert_succeeded", req.UserID)
 
 	summary, err := s.buildKYCStatusSummary(ctx, req.UserID)
 	if err != nil {
@@ -86,7 +104,11 @@ func (s *ApplicationService) submitTier2PlusKYC(ctx context.Context, user *domai
 	}
 
 	if s.kycOrchestrator == nil || !s.kycOrchestrator.SupportsTier2() {
-		return nil, errors.New("kyc_provider_not_configured")
+		return nil, providerConfigKYCError(
+			"KYC provider is not configured",
+			map[string]interface{}{"provider": "sumsub", "tier": tier},
+			errors.New("kyc_provider_not_configured"),
+		)
 	}
 
 	result, err := s.kycOrchestrator.SubmitTier2KYC(ctx, kyc.Tier2KYCRequest{
@@ -101,7 +123,7 @@ func (s *ApplicationService) submitTier2PlusKYC(ctx context.Context, user *domai
 		ProofOfAddressBase64: req.ProofOfAddressBase64,
 	})
 	if err != nil {
-		return nil, err
+		return nil, classifyKYCProviderError(err)
 	}
 
 	if err := s.persistAdvancedKYCSubmission(ctx, user.ID, req, result); err != nil {
@@ -131,7 +153,11 @@ func (s *ApplicationService) runTier1Provider(ctx context.Context, req dto.KYCSu
 		if s.options.AutoApproveKYC {
 			return &kyc.KYCResult{Status: "APPROVED", Tier: "TIER_1", Provider: "mock-local"}, nil
 		}
-		return nil, errors.New("kyc_provider_not_configured")
+		return nil, providerConfigKYCError(
+			"KYC provider is not configured",
+			map[string]interface{}{"provider": "sumsub"},
+			errors.New("kyc_provider_not_configured"),
+		)
 	default:
 		return s.runSmileIDTier1Provider(ctx, req, phone)
 	}
@@ -182,10 +208,30 @@ func (s *ApplicationService) runSmileIDTier1Provider(ctx context.Context, req dt
 }
 
 func (s *ApplicationService) submitSumsubTierKYC(ctx context.Context, req dto.KYCSubmitRequest, phone, tier string) (*kyc.KYCResult, error) {
+	userID, err := uuid.Parse(req.UserID)
+	if err != nil {
+		return nil, newKYCSubmitError(dto.ErrCodeValidation, http.StatusBadRequest, "Invalid user_id", nil, err)
+	}
+	levelName := strings.TrimSpace(s.sumsubLevelNameForTier(tier))
+	if levelName == "" {
+		return nil, providerConfigKYCError(
+			"Sumsub level name is not configured",
+			map[string]interface{}{"provider": "sumsub", "tier": tier, "missing_env": sumsubLevelEnvName(tier)},
+			errors.New("sumsub_level_name_missing"),
+		)
+	}
+	if s.options.SumsubWebSDKLinkTTLSeconds <= 0 {
+		return nil, providerConfigKYCError(
+			"Sumsub WebSDK link TTL is invalid",
+			map[string]interface{}{"provider": "sumsub", "tier": tier, "missing_env": "SUMSUB_WEBSDK_LINK_TTL_SECONDS"},
+			errors.New("sumsub_websdk_ttl_invalid"),
+		)
+	}
+
 	result, err := s.kycOrchestrator.SubmitSumsubKYC(ctx, kyc.SumsubKYCRequest{
-		UserID:      uuid.MustParse(req.UserID),
+		UserID:      userID,
 		TargetTier:  tier,
-		LevelName:   s.sumsubLevelNameForTier(tier),
+		LevelName:   levelName,
 		FirstName:   req.FirstName,
 		LastName:    req.LastName,
 		DateOfBirth: req.DateOfBirth,
@@ -204,7 +250,7 @@ func (s *ApplicationService) submitSumsubTierKYC(ctx context.Context, req dto.KY
 			}
 			return &kyc.KYCResult{Status: "APPROVED", Tier: tier, Provider: "mock-local"}, nil
 		}
-		return nil, err
+		return nil, classifyKYCProviderError(err)
 	}
 	return result, nil
 }
@@ -493,17 +539,49 @@ func normalizeKYCTier(raw string) string {
 }
 
 func (s *ApplicationService) sumsubLevelNameForTier(tier string) string {
+	fallback := func(value string) string {
+		if strings.EqualFold(strings.TrimSpace(s.options.Environment), "production") {
+			return ""
+		}
+		return value
+	}
 	switch normalizeKYCTier(tier) {
 	case "TIER_1":
-		return firstNonEmptyLocal(s.options.SumsubTier1LevelName, "telegram-tier1")
+		return firstNonEmptyLocal(s.options.SumsubTier1LevelName, fallback("telegram-tier1"))
 	case "TIER_2":
-		return firstNonEmptyLocal(s.options.SumsubTier2LevelName, "telegram-tier2")
+		return firstNonEmptyLocal(s.options.SumsubTier2LevelName, fallback("telegram-tier2"))
 	case "TIER_3":
-		return firstNonEmptyLocal(s.options.SumsubTier3LevelName, "telegram-tier3")
+		return firstNonEmptyLocal(s.options.SumsubTier3LevelName, fallback("telegram-tier3"))
 	case "TIER_4":
-		return firstNonEmptyLocal(s.options.SumsubTier4LevelName, "telegram-tier4")
+		return firstNonEmptyLocal(s.options.SumsubTier4LevelName, fallback("telegram-tier4"))
 	default:
-		return firstNonEmptyLocal(s.options.SumsubTier1LevelName, "telegram-tier1")
+		return firstNonEmptyLocal(s.options.SumsubTier1LevelName, fallback("telegram-tier1"))
+	}
+}
+
+func (s *ApplicationService) logKYCSubmitStage(stage string, userID string, attrs ...interface{}) {
+	if s == nil || s.logger == nil {
+		return
+	}
+	args := []interface{}{
+		"stage", stage,
+		"user_id", strings.TrimSpace(userID),
+		"provider", normalizeKYCProvider(s.options.KYCPrimaryProvider),
+	}
+	args = append(args, attrs...)
+	s.logger.Info(stage, args...)
+}
+
+func sumsubLevelEnvName(tier string) string {
+	switch normalizeKYCTier(tier) {
+	case "TIER_2":
+		return "SUMSUB_TIER2_LEVEL_NAME"
+	case "TIER_3":
+		return "SUMSUB_TIER3_LEVEL_NAME"
+	case "TIER_4":
+		return "SUMSUB_TIER4_LEVEL_NAME"
+	default:
+		return "SUMSUB_TIER1_LEVEL_NAME"
 	}
 }
 

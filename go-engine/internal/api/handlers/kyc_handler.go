@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"time"
 
@@ -19,6 +20,14 @@ type KYCHandler struct {
 	svc KYCService
 }
 
+type safeKYCSubmitError interface {
+	error
+	SafeCode() string
+	SafeMessage() string
+	StatusCode() int
+	DetailsMap() map[string]interface{}
+}
+
 func NewKYCHandler(svc KYCService) *KYCHandler {
 	return &KYCHandler{svc: svc}
 }
@@ -32,9 +41,15 @@ func (h *KYCHandler) SubmitKYC(c *gin.Context) {
 
 	summary, err := h.svc.SubmitKYC(c.Request.Context(), req)
 	if err != nil {
+		var safeErr safeKYCSubmitError
+		if errors.As(err, &safeErr) {
+			c.JSON(safeErr.StatusCode(), dto.NewError(safeErr.SafeCode(), safeErr.SafeMessage(), safeErr.DetailsMap()))
+			return
+		}
+
 		switch err.Error() {
 		case "user_not_found":
-			c.JSON(http.StatusNotFound, dto.NewError(dto.ErrCodeNotFound, "User not found", nil))
+			c.JSON(http.StatusNotFound, dto.NewError(dto.ErrCodeUserNotFound, "User not found", nil))
 		case "kyc_already_approved":
 			c.JSON(http.StatusConflict, dto.NewError("KYC_ALREADY_APPROVED", "This user has already been KYC approved", nil))
 		case "consent_required":
@@ -42,7 +57,7 @@ func (h *KYCHandler) SubmitKYC(c *gin.Context) {
 		case "tier_upgrade_requires_approved_kyc":
 			c.JSON(http.StatusConflict, dto.NewError("KYC_TIER_PREREQUISITE", "Tier 1 KYC must be approved before upgrading", nil))
 		case "kyc_provider_not_configured":
-			c.JSON(http.StatusServiceUnavailable, dto.NewError("KYC_PROVIDER_UNAVAILABLE", "KYC provider is not configured", nil))
+			c.JSON(http.StatusBadGateway, dto.NewError(dto.ErrCodeProviderConfiguration, "KYC provider is not configured", nil))
 		default:
 			c.JSON(http.StatusInternalServerError, dto.NewError(dto.ErrCodeInternalError, "Failed to submit KYC", nil))
 		}
