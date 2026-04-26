@@ -70,13 +70,6 @@ func DefaultDepositPolicySet() DepositPolicySet {
 		FinalityConfirmations:  64,
 		AmountToleranceMinor:   0,
 	})
-	set.Put(DepositConfirmationPolicy{
-		Currency:               "USDT",
-		Network:                "bsc",
-		DetectionConfirmations: 1,
-		FinalityConfirmations:  20,
-		AmountToleranceMinor:   0,
-	})
 	return set
 }
 
@@ -89,7 +82,6 @@ func NewDepositPolicySetFromEnv() DepositPolicySet {
 	set.overrideFromEnv("BNB", "bsc", "BNB_BSC_DEPOSIT_DETECTION_CONFIRMATIONS", "BNB_BSC_DEPOSIT_FINALITY_CONFIRMATIONS", "BNB_BSC_DEPOSIT_AMOUNT_TOLERANCE_MINOR")
 	set.overrideFromEnv("USDT", "ethereum", "USDT_ETH_DEPOSIT_DETECTION_CONFIRMATIONS", "USDT_ETH_DEPOSIT_FINALITY_CONFIRMATIONS", "USDT_ETH_DEPOSIT_AMOUNT_TOLERANCE_MINOR")
 	set.overrideFromEnv("USDT", "polygon", "USDT_POLYGON_DEPOSIT_DETECTION_CONFIRMATIONS", "USDT_POLYGON_DEPOSIT_FINALITY_CONFIRMATIONS", "USDT_POLYGON_DEPOSIT_AMOUNT_TOLERANCE_MINOR")
-	set.overrideFromEnv("USDT", "bsc", "USDT_BSC_DEPOSIT_DETECTION_CONFIRMATIONS", "USDT_BSC_DEPOSIT_FINALITY_CONFIRMATIONS", "USDT_BSC_DEPOSIT_AMOUNT_TOLERANCE_MINOR")
 	return set
 }
 

@@ -56,14 +56,14 @@ func TestBuildDepositAddressForTradeTagsUSDCNetworkAddress(t *testing.T) {
 
 func TestBuildDepositAddressForTradeTagsUSDTNetworkAddress(t *testing.T) {
 	t.Setenv("BLOCKCHAIN_MONITOR_MODE", "production")
-	t.Setenv("USDT_DEPOSIT_NETWORK", "bsc")
-	t.Setenv("USDT_BSC_DEPOSIT_ADDRESS", "0xbsc")
+	t.Setenv("USDT_DEPOSIT_NETWORK", "polygon")
+	t.Setenv("USDT_POLYGON_DEPOSIT_ADDRESS", "0xpoly")
 
 	address, err := buildDepositAddressForTrade("USDT", "TRD-ABC123")
 	if err != nil {
 		t.Fatalf("build deposit address: %v", err)
 	}
-	if address != "bsc:0xbsc" {
+	if address != "polygon:0xpoly" {
 		t.Fatalf("unexpected USDT address: %s", address)
 	}
 }

@@ -9,7 +9,7 @@ func TestDepositPolicySetDefaultsAndOverrides(t *testing.T) {
 	t.Setenv("USDC_POLYGON_DEPOSIT_FINALITY_CONFIRMATIONS", "80")
 	t.Setenv("USDC_POLYGON_DEPOSIT_AMOUNT_TOLERANCE_MINOR", "5")
 	t.Setenv("BNB_BSC_DEPOSIT_FINALITY_CONFIRMATIONS", "25")
-	t.Setenv("USDT_BSC_DEPOSIT_AMOUNT_TOLERANCE_MINOR", "7")
+	t.Setenv("USDT_POLYGON_DEPOSIT_AMOUNT_TOLERANCE_MINOR", "7")
 
 	policies := NewDepositPolicySetFromEnv()
 
@@ -45,12 +45,12 @@ func TestDepositPolicySetDefaultsAndOverrides(t *testing.T) {
 		t.Fatalf("expected BNB BSC finality 25, got %d", bnb.FinalityConfirmations)
 	}
 
-	usdt, ok := policies.Resolve("USDT", "bsc")
+	usdt, ok := policies.Resolve("USDT", "polygon")
 	if !ok {
-		t.Fatalf("expected USDT BSC policy")
+		t.Fatalf("expected USDT Polygon policy")
 	}
 	if usdt.AmountToleranceMinor != 7 {
-		t.Fatalf("expected USDT BSC tolerance 7, got %d", usdt.AmountToleranceMinor)
+		t.Fatalf("expected USDT Polygon tolerance 7, got %d", usdt.AmountToleranceMinor)
 	}
 }
 

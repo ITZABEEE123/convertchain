@@ -63,7 +63,6 @@ func NewBlockchainClientFromEnv(logger *slog.Logger) workers.BlockchainClient {
 	client.configureTokenEVM("USDC", "polygon", "USDC_POLYGON_RPC_URL", "POLYGON_RPC_URL", "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359", "USDC_POLYGON_CONTRACT")
 	client.configureTokenEVM("USDT", "ethereum", "USDT_ETH_RPC_URL", "ETH_RPC_URL", "0xdAC17F958D2ee523a2206206994597C13D831ec7", "USDT_ETH_CONTRACT")
 	client.configureTokenEVM("USDT", "polygon", "USDT_POLYGON_RPC_URL", "POLYGON_RPC_URL", "0xc2132D05D31c914a87C6611C10748AEb04B58e8F", "USDT_POLYGON_CONTRACT")
-	client.configureTokenEVM("USDT", "bsc", "USDT_BSC_RPC_URL", "BSC_RPC_URL", "0x55d398326f99059fF775485246999027B3197955", "USDT_BSC_CONTRACT")
 
 	if len(client.tokenEVM) == 0 && len(client.nativeEVM) == 0 {
 		logger.Warn("production blockchain monitor enabled but no EVM adapters configured")
