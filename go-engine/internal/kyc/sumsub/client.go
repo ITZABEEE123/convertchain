@@ -122,6 +122,12 @@ type Applicant struct {
 	InspectionID   string `json:"inspectionId"`
 	ExternalUserID string `json:"externalUserId"`
 	ReviewStatus   string `json:"reviewStatus"`
+	ReviewResult   struct {
+		ReviewAnswer      string   `json:"reviewAnswer"`
+		RejectLabels      []string `json:"rejectLabels"`
+		ModerationComment string   `json:"moderationComment"`
+		ClientComment     string   `json:"clientComment"`
+	} `json:"reviewResult"`
 }
 
 func (c *Client) CreateApplicant(ctx context.Context, req ApplicantRequest) (*Applicant, error) {
@@ -181,6 +187,38 @@ func (c *Client) CreateApplicant(ctx context.Context, req ApplicantRequest) (*Ap
 	}
 	if applicant.ID == "" {
 		return nil, fmt.Errorf("sumsub create applicant response missing applicant id")
+	}
+
+	return &applicant, nil
+}
+
+func (c *Client) GetApplicantByExternalUserID(ctx context.Context, externalUserID string) (*Applicant, error) {
+	if !c.Enabled() {
+		return nil, &ProviderError{Operation: "get_applicant_by_external_user_id", Code: "SUMSUB_NOT_CONFIGURED", Message: "sumsub is not configured"}
+	}
+
+	trimmedExternalUserID := strings.TrimSpace(externalUserID)
+	if trimmedExternalUserID == "" {
+		return nil, &ProviderError{Operation: "get_applicant_by_external_user_id", Code: "SUMSUB_EXTERNAL_USER_ID_MISSING", Message: "sumsub externalUserId is required"}
+	}
+
+	uri := "/resources/applicants/-;externalUserId=" + url.PathEscape(trimmedExternalUserID) + "/one"
+	resp, err := c.do(ctx, http.MethodGet, uri, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, decodeProviderError("get_applicant_by_external_user_id", resp)
+	}
+
+	var applicant Applicant
+	if err := json.NewDecoder(resp.Body).Decode(&applicant); err != nil {
+		return nil, fmt.Errorf("decode applicant lookup response: %w", err)
+	}
+	if applicant.ID == "" {
+		return nil, fmt.Errorf("sumsub applicant lookup response missing applicant id")
 	}
 
 	return &applicant, nil

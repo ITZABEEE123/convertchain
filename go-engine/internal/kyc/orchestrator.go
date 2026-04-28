@@ -14,9 +14,18 @@ import (
 
 var sensitiveNumberPattern = regexp.MustCompile(`\+?\d[\d\s-]{5,}\d`)
 
+type sumsubProvider interface {
+	Enabled() bool
+	IsSandbox() bool
+	VerifyWebhookSignature(payload []byte, digest, algorithm, secretOverride string) bool
+	CreateApplicant(ctx context.Context, req sumsub.ApplicantRequest) (*sumsub.Applicant, error)
+	GetApplicantByExternalUserID(ctx context.Context, externalUserID string) (*sumsub.Applicant, error)
+	CreateWebSDKLink(ctx context.Context, req sumsub.WebSDKLinkRequest) (*sumsub.WebSDKLink, error)
+}
+
 type KYCOrchestrator struct {
 	smileID *smileid.Client
-	sumsub  *sumsub.Client
+	sumsub  sumsubProvider
 	repo    KYCRepository
 	logger  *slog.Logger
 }
@@ -235,9 +244,11 @@ func (o *KYCOrchestrator) SubmitSumsubKYC(ctx context.Context, req SumsubKYCRequ
 		return nil, fmt.Errorf("sumsub level name is required")
 	}
 
-	o.logSumsubStage("sumsub_create_applicant_started", req.UserID.String(), levelName)
+	externalUserID := req.UserID.String()
+
+	o.logSumsubStage("sumsub_create_applicant_started", externalUserID, levelName)
 	applicant, err := o.sumsub.CreateApplicant(ctx, sumsub.ApplicantRequest{
-		ExternalUserID: req.UserID.String(),
+		ExternalUserID: externalUserID,
 		LevelName:      levelName,
 		FirstName:      req.FirstName,
 		LastName:       req.LastName,
@@ -245,25 +256,62 @@ func (o *KYCOrchestrator) SubmitSumsubKYC(ctx context.Context, req SumsubKYCRequ
 		Email:          req.Email,
 		PhoneNumber:    req.PhoneNumber,
 	})
+	duplicateApplicant := false
 	if err != nil {
-		o.logSumsubFailure("sumsub_create_applicant_failed", req.UserID.String(), levelName, err)
-		return nil, fmt.Errorf("create sumsub applicant failed: %w", err)
-	}
-	o.logSumsubStage("sumsub_create_applicant_succeeded", req.UserID.String(), levelName)
+		o.logSumsubFailure("sumsub_create_applicant_failed", externalUserID, levelName, err)
+		if !isSumsubDuplicateApplicantError(err) {
+			return nil, fmt.Errorf("create sumsub applicant failed: %w", err)
+		}
 
-	o.logSumsubStage("sumsub_websdk_link_started", req.UserID.String(), levelName)
+		duplicateApplicant = true
+		o.logSumsubStage("sumsub_duplicate_applicant_detected", externalUserID, levelName)
+		o.logSumsubStage("sumsub_existing_applicant_fetch_started", externalUserID, levelName)
+		applicant, err = o.sumsub.GetApplicantByExternalUserID(ctx, externalUserID)
+		if err != nil {
+			o.logSumsubFailure("sumsub_existing_applicant_fetch_failed", externalUserID, levelName, err)
+			return nil, fmt.Errorf("fetch existing sumsub applicant failed: %w", err)
+		}
+		o.logSumsubStage("sumsub_existing_applicant_fetch_succeeded", externalUserID, levelName)
+	} else {
+		o.logSumsubStage("sumsub_create_applicant_succeeded", externalUserID, levelName)
+	}
+
+	status, reason := sumsubApplicantKYCStatus(applicant)
+	if status == "APPROVED" || status == "REJECTED" {
+		if duplicateApplicant {
+			o.logSumsubStage("kyc_submit_idempotent_success", externalUserID, levelName)
+		}
+		resultTier := targetTier
+		if status == "REJECTED" {
+			resultTier = "TIER_0"
+		}
+		return &KYCResult{
+			Status:         status,
+			Tier:           resultTier,
+			Provider:       "sumsub",
+			ProviderRef:    applicant.ID,
+			ProviderStatus: applicant.ReviewStatus,
+			LevelName:      levelName,
+			Reason:         reason,
+		}, nil
+	}
+
+	o.logSumsubStage("sumsub_websdk_link_started", externalUserID, levelName)
 	link, err := o.sumsub.CreateWebSDKLink(ctx, sumsub.WebSDKLinkRequest{
-		UserID:      req.UserID.String(),
+		UserID:      externalUserID,
 		LevelName:   levelName,
 		Email:       req.Email,
 		PhoneNumber: req.PhoneNumber,
 		TTLInSecs:   req.TTLInSecs,
 	})
 	if err != nil {
-		o.logSumsubFailure("sumsub_websdk_link_failed", req.UserID.String(), levelName, err)
+		o.logSumsubFailure("sumsub_websdk_link_failed", externalUserID, levelName, err)
 		return nil, fmt.Errorf("create sumsub websdk link failed: %w", err)
 	}
-	o.logSumsubStage("sumsub_websdk_link_succeeded", req.UserID.String(), levelName)
+	o.logSumsubStage("sumsub_websdk_link_succeeded", externalUserID, levelName)
+	if duplicateApplicant {
+		o.logSumsubStage("kyc_submit_idempotent_success", externalUserID, levelName)
+	}
 
 	return &KYCResult{
 		Status:          "PENDING",
@@ -274,6 +322,49 @@ func (o *KYCOrchestrator) SubmitSumsubKYC(ctx context.Context, req SumsubKYCRequ
 		LevelName:       levelName,
 		VerificationURL: link.URL,
 	}, nil
+}
+
+func isSumsubDuplicateApplicantError(err error) bool {
+	var providerErr *sumsub.ProviderError
+	if !errors.As(err, &providerErr) {
+		return false
+	}
+	code := strings.ToUpper(strings.TrimSpace(providerErr.Code))
+	message := strings.ToLower(strings.TrimSpace(providerErr.Message))
+	return providerErr.StatusCode == 409 ||
+		strings.Contains(code, "DUPLICATE") ||
+		strings.Contains(code, "ALREADY") ||
+		strings.Contains(message, "already exists")
+}
+
+func sumsubApplicantKYCStatus(applicant *sumsub.Applicant) (string, string) {
+	if applicant == nil {
+		return "PENDING", ""
+	}
+	reviewAnswer := strings.ToUpper(strings.TrimSpace(applicant.ReviewResult.ReviewAnswer))
+	switch reviewAnswer {
+	case "GREEN":
+		return "APPROVED", ""
+	case "RED":
+		return "REJECTED", firstNonEmptyReason(
+			applicant.ReviewResult.ModerationComment,
+			applicant.ReviewResult.ClientComment,
+			"Sumsub verification was rejected",
+		)
+	}
+
+	switch strings.ToLower(strings.TrimSpace(applicant.ReviewStatus)) {
+	case "completed":
+		return "APPROVED", ""
+	case "rejected":
+		return "REJECTED", firstNonEmptyReason(
+			applicant.ReviewResult.ModerationComment,
+			applicant.ReviewResult.ClientComment,
+			"Sumsub verification was rejected",
+		)
+	default:
+		return "PENDING", ""
+	}
 }
 
 func (o *KYCOrchestrator) logSumsubStage(stage string, userID string, levelName string) {

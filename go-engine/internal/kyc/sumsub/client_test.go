@@ -64,6 +64,35 @@ func TestCreateWebSDKLinkReturnsURL(t *testing.T) {
 	}
 }
 
+func TestGetApplicantByExternalUserIDReturnsApplicant(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		expectedPath := "/resources/applicants/-;externalUserId=user-1/one"
+		if r.URL.Path != expectedPath {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if r.Method != http.MethodGet {
+			t.Fatalf("unexpected method: %s", r.Method)
+		}
+		if r.Header.Get("X-App-Token") == "" || r.Header.Get("X-App-Access-Sig") == "" || r.Header.Get("X-App-Access-Ts") == "" {
+			t.Fatal("missing Sumsub auth headers")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"applicant-123","externalUserId":"user-1","reviewStatus":"init"}`))
+	}))
+	defer server.Close()
+
+	client := NewClient("app-token", "secret-key", false)
+	client.baseURL = server.URL
+
+	applicant, err := client.GetApplicantByExternalUserID(context.Background(), "user-1")
+	if err != nil {
+		t.Fatalf("GetApplicantByExternalUserID returned error: %v", err)
+	}
+	if applicant.ID != "applicant-123" {
+		t.Fatalf("unexpected applicant id: %s", applicant.ID)
+	}
+}
+
 func hmacDigest(hashFactory func() hash.Hash, secret string, payload []byte) string {
 	mac := hmac.New(hashFactory, []byte(secret))
 	mac.Write(payload)
