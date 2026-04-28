@@ -49,9 +49,10 @@ func newBankResolveError(code, message string, status int, details map[string]an
 	return &bankResolveError{code: code, message: message, status: status, details: details, cause: cause}
 }
 
-func classifyBankResolveError(err error, bankCode, accountNumber string) error {
+func classifyBankResolveError(err error, bankCode, bankName, accountNumber string) error {
 	details := map[string]any{
 		"bank_code":     strings.TrimSpace(bankCode),
+		"bank_name":     strings.TrimSpace(bankName),
 		"account_last4": accountLast4(accountNumber),
 	}
 

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 import structlog
 
+from app.flows.onboarding import STEP_SET_TX_PASSWORD
 from app.flows.router import FlowRouter
 from app.providers.types import InboundEnvelope, OutboundMessage
 from app.services.engine_client import EngineClient, EngineError
@@ -75,6 +77,7 @@ class MessageRuntime:
             try:
                 outbound = await self._build_notification_message(
                     notification,
+                    provider_name=getattr(provider, "provider_name", ""),
                     outbound_channel=outbound_channel or channel_type.lower(),
                 )
                 if outbound is None:
@@ -128,6 +131,7 @@ class MessageRuntime:
         self,
         notification: dict[str, Any],
         *,
+        provider_name: str = "",
         outbound_channel: str,
     ) -> OutboundMessage | None:
         event_type = str(notification.get("event_type") or "").strip()
@@ -137,7 +141,24 @@ class MessageRuntime:
         trade_id = str(notification.get("trade_id") or payload.get("trade_id") or "").strip()
 
         text: str | None = None
-        if event_type == "trade.deposit_detected":
+        if event_type in {"kyc.verified", "KYC_VERIFIED"}:
+            first_name = str(payload.get("first_name") or "there").strip() or "there"
+            await self._activate_kyc_verified_session(
+                recipient_id=recipient_id,
+                provider_name=provider_name or "telegram_direct",
+                outbound_channel=outbound_channel,
+                payload=payload,
+            )
+            text = (
+                "✅ *Step 7 of 9 — Identity Verified*\n\n"
+                f"Congratulations, {first_name}! Your identity has been verified.\n\n"
+                "*Step 8 of 9 — Secure Your Account*\n\n"
+                "Before you can trade, set a transaction password.\n\n"
+                "You will use this password whenever you confirm a trade or delete your account.\n\n"
+                "Send a transaction password with at least 6 characters.\n"
+                "This setup prompt expires after 5 minutes of inactivity."
+            )
+        elif event_type == "trade.deposit_detected":
             confirmations = int(payload.get("confirmations", 1) or 1)
             required = int(payload.get("required_confirmations", 2) or 2)
             text = (
@@ -227,6 +248,31 @@ class MessageRuntime:
             text=text,
             metadata={"notification_id": notification.get("id"), "event_type": event_type},
         )
+
+    async def _activate_kyc_verified_session(
+        self,
+        *,
+        recipient_id: str,
+        provider_name: str,
+        outbound_channel: str,
+        payload: dict[str, Any],
+    ) -> None:
+        if not recipient_id:
+            return
+        scoped = ScopedSessionService(self._session, provider_name, outbound_channel)
+        session = await scoped.get(recipient_id)
+        if session.get("transaction_password_set"):
+            return
+
+        session["flow"] = "onboarding"
+        session["step"] = STEP_SET_TX_PASSWORD
+        session["onboarded"] = False
+        session["engine_user_id"] = str(payload.get("user_id") or session.get("engine_user_id") or "")
+        data = session.setdefault("data", {})
+        if payload.get("first_name"):
+            data["first_name"] = str(payload.get("first_name"))
+        data["tx_password_started_at"] = datetime.now(timezone.utc).isoformat()
+        await scoped.set(recipient_id, session)
 
     def _render_payout_completed(self, payload: dict[str, Any], receipt: dict[str, Any] | None) -> str:
         trade_ref = payload.get("trade_ref") or payload.get("trade_id") or "-"

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import inspect
 import re
+from difflib import SequenceMatcher
 from typing import Any
 
 import structlog
@@ -23,14 +25,20 @@ STANDALONE_ACCOUNT_NUMBER_PATTERN = re.compile(r"\b(\d{10})\b")
 USE_BANK_PATTERN = re.compile(r"^use\s+bank\s+(\d+)$", re.IGNORECASE)
 CONFIRM_SAVE_KEYWORDS = {"yes", "y", "save", "confirm", "confirm save"}
 RETRY_ACCOUNT_KEYWORDS = {"no", "n", "change", "edit", "retry", "different"}
+CONFIRM_BANK_SUGGESTION_KEYWORDS = {"yes", "y"}
 POPULAR_BANK_CHOICES = (
-    ("058", "GTBank"),
-    ("044", "Access Bank"),
-    ("033", "UBA"),
-    ("011", "First Bank"),
-    ("057", "Zenith Bank"),
+    ("zenith", "Zenith Bank", {"zenith", "zenith bank"}),
+    ("gtbank", "GTBank", {"gtb", "gtbank", "guaranty trust", "guaranty trust bank", "guaranty"}),
+    ("access", "Access Bank", {"access", "access bank"}),
+    ("uba", "UBA", {"uba", "united bank for africa", "united bank africa"}),
+    ("first", "First Bank", {"first bank", "firstbank", "fbn", "first bank nigeria"}),
+    ("opay", "OPay", {"opay", "o pay", "paycom"}),
+    ("palmpay", "PalmPay", {"palmpay", "palm pay"}),
+    ("kuda", "Kuda", {"kuda", "kuda bank"}),
+    ("moniepoint", "Moniepoint", {"moniepoint", "monie point"}),
+    ("stanbic", "Stanbic IBTC", {"stanbic", "stanbic ibtc", "stanbic ibtc bank"}),
 )
-POPULAR_BANK_PRIORITY = {code: index for index, (code, _) in enumerate(POPULAR_BANK_CHOICES)}
+POPULAR_BANK_PRIORITY = {key: index for index, (key, _, _) in enumerate(POPULAR_BANK_CHOICES)}
 BANK_NAME_ALIASES = {
     "058": {"gtbank", "gtb", "guaranty trust", "guaranty trust bank"},
     "044": {"access", "access bank"},
@@ -55,6 +63,11 @@ BANK_NAME_ALIASES = {
     "999992": {"opay", "o pay"},
     "50211": {"kuda", "kuda bank"},
 }
+COMMON_BANK_WORDS = {"bank", "plc", "limited", "ltd", "microfinance", "mfb", "nigeria", "service", "services"}
+BANK_TYPO_SUGGESTIONS = {
+    "senith": "zenith",
+    "zenit": "zenith",
+}
 
 
 class BankFlow:
@@ -69,23 +82,27 @@ class BankFlow:
         self._channel = channel
 
     async def start(self, user_id: str, session: dict) -> str:
+        banks = await self._load_bank_directory()
+        popular_banks = self._popular_bank_options(banks or [])
         session = self._clear_bank_state(session)
         session["flow"] = "bank"
         session["step"] = STEP_COLLECT_BANK_CODE
-        session["bank_data"] = {}
+        session["bank_data"] = {"popular_banks": popular_banks}
         await self._session.set(user_id, session)
+
+        popular_lines = []
+        for index, bank in enumerate(popular_banks, start=1):
+            popular_lines.append(f"{index}. {self._popular_display_label(bank)}")
+        if not popular_lines:
+            popular_lines = [f"{index}. {label}" for index, (_, label, _) in enumerate(POPULAR_BANK_CHOICES, start=1)]
 
         return (
             "*Add Bank Account*\n\n"
-            "Send your bank code or bank name.\n\n"
-            "Popular banks:\n"
-            "- `058` - GTBank\n"
-            "- `044` - Access Bank\n"
-            "- `033` - UBA\n"
-            "- `011` - First Bank\n"
-            "- `057` - Zenith Bank\n\n"
+            "Choose one of these popular banks by typing the name or number:\n\n"
+            + "\n".join(popular_lines)
+            + "\n\n"
             "If your bank is not listed, just type the bank name.\n"
-            "Examples: `Moniepoint`, `OPay`, `PalmPay`\n\n"
+            "Examples: `Zenith`, `OPay`, `Moniepoint`, `Access`\n\n"
             "Type *cancel* anytime to stop."
         )
 
@@ -170,37 +187,81 @@ class BankFlow:
 
     async def _handle_collect_bank_code(self, user_id: str, session: dict, text: str) -> str:
         banks = await self._load_bank_directory()
-        bank_code = self._extract_bank_code(text)
-        bank_name = None
+        bank_data = session.setdefault("bank_data", {})
+        normalized_text = text.strip().lower()
 
         log.info("bank_match_started", user_id=user_id[:6])
         if banks:
-            matched_bank, suggestions = self._resolve_bank_input(banks, text)
+            stored_suggestions = bank_data.get("bank_suggestions") or []
+            if text.strip().isdigit() and stored_suggestions:
+                index = int(text.strip()) - 1
+                if 0 <= index < len(stored_suggestions):
+                    matched_bank = stored_suggestions[index]
+                    suggestions: list[dict[str, Any]] = []
+                    needs_confirmation = False
+                else:
+                    matched_bank, suggestions, needs_confirmation = None, [], False
+            elif normalized_text in CONFIRM_BANK_SUGGESTION_KEYWORDS and bank_data.get("bank_suggestion"):
+                matched_bank = bank_data["bank_suggestion"]
+                suggestions = []
+                needs_confirmation = False
+            else:
+                popular_banks = bank_data.get("popular_banks") or self._popular_bank_options(banks)
+                matched_bank, suggestions, needs_confirmation = self._resolve_bank_input(banks, text, popular_banks=popular_banks)
+
             if matched_bank is None:
                 if suggestions:
                     log.info("bank_match_ambiguous", user_id=user_id[:6], suggestion_count=len(suggestions))
+                    bank_data["bank_suggestions"] = suggestions
+                    bank_data.pop("bank_suggestion", None)
+                    await self._session.set(user_id, session)
+                    if needs_confirmation and len(suggestions) == 1:
+                        bank_data["bank_suggestion"] = suggestions[0]
+                        bank_data.pop("bank_suggestions", None)
+                        await self._session.set(user_id, session)
+                        return self._format_bank_confirmation(suggestions[0])
                     return self._format_bank_suggestions(suggestions)
                 return (
                     "I could not find that bank in the current bank directory.\n\n"
-                    "Send a 3 to 6 digit bank code or type the bank name.\n"
-                    "Examples: `058`, `GTBank`, `Zenith`"
+                    "Type the bank name again, or choose one of the popular bank numbers from the Add Bank menu.\n"
+                    "Examples: `Zenith`, `GTBank`, `OPay`"
                 )
-            bank_code = (matched_bank.get("bank_code") or "").strip()
-            bank_name = (matched_bank.get("bank_name") or "").strip() or None
+            selected_bank = self._normalize_bank_record(matched_bank)
+            bank_code = selected_bank["resolve_bank_code"]
+            bank_name = selected_bank["bank_name"]
             log.info("bank_match_succeeded", user_id=user_id[:6], bank_code=bank_code, bank_name=bank_name)
-        elif not BANK_CODE_PATTERN.match(bank_code):
+        else:
+            bank_code = self._extract_bank_code(text)
+            if not BANK_CODE_PATTERN.match(bank_code):
+                return (
+                    "Invalid bank input. Please type the bank name.\n\n"
+                    "Examples: `Zenith`, `Access Bank`, `UBA`"
+                )
+            selected_bank = {
+                "bank_code": bank_code,
+                "resolve_bank_code": bank_code,
+                "bank_name": "",
+                "currency": "NGN",
+            }
+
+        if not selected_bank.get("resolve_bank_code"):
             return (
-                "Invalid bank input. Please send a bank code or bank name.\n\n"
-                "Examples: `058`, `Access Bank`, `UBA`"
+                "I found that bank, but it is not currently available for account verification.\n\n"
+                "Please type another bank name."
             )
 
-        session.setdefault("bank_data", {})["bank_code"] = bank_code
-        if bank_name:
-            session["bank_data"]["bank_name"] = bank_name
+        session["bank_data"] = {
+            **bank_data,
+            **selected_bank,
+            "bank_code": selected_bank["resolve_bank_code"],
+            "bank_name": selected_bank.get("bank_name", ""),
+        }
+        session["bank_data"].pop("bank_suggestions", None)
+        session["bank_data"].pop("bank_suggestion", None)
         session["step"] = STEP_COLLECT_ACCOUNT_NUMBER
         await self._session.set(user_id, session)
 
-        bank_label = f"*{bank_name}*" if bank_name else f"bank code `{bank_code}`"
+        bank_label = f"*{selected_bank.get('bank_name') or 'that bank'}*"
         return (
             f"I found {bank_label}. Now send your 10-digit account number.\n\n"
             "Example: `1234567890`"
@@ -222,7 +283,8 @@ class BankFlow:
             resolution = await self._engine.resolve_bank_account(
                 {
                     "user_id": engine_user_id,
-                    "bank_code": bank_code,
+                    "provider_bank_id": session.get("bank_data", {}).get("provider_bank_id", ""),
+                    "bank_code": session.get("bank_data", {}).get("resolve_bank_code") or bank_code,
                     "bank_name": bank_name,
                     "account_number": account_number,
                     "currency": "NGN",
@@ -240,6 +302,7 @@ class BankFlow:
             return self._bank_resolve_error_message(exc)
 
         session.setdefault("bank_data", {})["bank_code"] = resolution.get("bank_code") or bank_code
+        session["bank_data"]["resolve_bank_code"] = resolution.get("bank_code") or session["bank_data"].get("resolve_bank_code") or bank_code
         session["bank_data"]["bank_name"] = resolution.get("bank_name") or bank_name or "Bank"
         session["bank_data"]["account_number"] = account_number
         session["bank_data"]["account_name"] = resolution.get("account_name") or ""
@@ -283,7 +346,8 @@ class BankFlow:
             account = await self._engine.add_bank_account(
                 {
                     "user_id": engine_user_id,
-                    "bank_code": bank_data.get("bank_code", ""),
+                    "provider_bank_id": bank_data.get("provider_bank_id", ""),
+                    "bank_code": bank_data.get("resolve_bank_code") or bank_data.get("bank_code", ""),
                     "bank_name": bank_data.get("bank_name", ""),
                     "account_number": bank_data.get("account_number", ""),
                     "account_name": bank_data.get("account_name", ""),
@@ -326,9 +390,13 @@ class BankFlow:
 
     async def _load_bank_directory(self) -> list[dict] | None:
         try:
-            response = await self._engine.list_banks()
+            response = self._engine.list_banks()
+            if inspect.isawaitable(response):
+                response = await response
         except EngineError as exc:
             log.warning("Failed to load bank directory", error=str(exc))
+            return None
+        if not isinstance(response, dict):
             return None
         return response.get("banks", [])
 
@@ -374,61 +442,86 @@ class BankFlow:
         return payload
 
     @classmethod
-    def _resolve_bank_input(cls, banks: list[dict[str, Any]], text: str) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    def _resolve_bank_input(
+        cls,
+        banks: list[dict[str, Any]],
+        text: str,
+        *,
+        popular_banks: list[dict[str, Any]] | None = None,
+    ) -> tuple[dict[str, Any] | None, list[dict[str, Any]], bool]:
         payload = text.strip()
+        if payload.isdigit() and popular_banks:
+            index = int(payload) - 1
+            if 0 <= index < len(popular_banks):
+                return popular_banks[index], [], False
+
         code = cls._extract_bank_code(payload)
         if BANK_CODE_PATTERN.match(code):
-            matched = [bank for bank in banks if (bank.get("bank_code") or "").strip() == code]
+            matched = [bank for bank in banks if code in cls._bank_codes(bank)]
             if len(matched) == 1:
-                return matched[0], []
+                return matched[0], [], False
             if len(matched) > 1:
-                return None, cls._sort_bank_matches(matched)[:5]
+                return None, cls._sort_bank_matches(matched)[:5], False
 
         query = cls._normalize_bank_lookup(payload)
         if not query:
-            return None, []
+            return None, [], False
+        if query in BANK_TYPO_SUGGESTIONS:
+            target_key = BANK_TYPO_SUGGESTIONS[query]
+            typo_matches = [bank for bank in banks if cls._popular_key_for_bank(bank) == target_key]
+            if typo_matches:
+                return None, [cls._sort_bank_matches(typo_matches)[0]], True
 
         exact_matches: list[dict[str, Any]] = []
-        fuzzy_matches: list[tuple[int, dict[str, Any]]] = []
+        fuzzy_matches: list[tuple[float, dict[str, Any]]] = []
         for bank in banks:
-            score = cls._score_bank_match(bank, query)
-            if score is None:
-                continue
-            if score == 0:
+            terms = cls._bank_terms(bank)
+            if query in terms:
                 exact_matches.append(bank)
-            else:
-                fuzzy_matches.append((score, bank))
+                continue
+            if any(term.startswith(query) or query in term for term in terms):
+                fuzzy_matches.append((0.82, bank))
+                continue
+            best_ratio = max((SequenceMatcher(None, query, term).ratio() for term in terms), default=0.0)
+            if best_ratio >= 0.72:
+                fuzzy_matches.append((best_ratio, bank))
 
         if len(exact_matches) == 1:
-            return exact_matches[0], []
+            return exact_matches[0], [], False
         if len(exact_matches) > 1:
-            return None, cls._sort_bank_matches(exact_matches)[:5]
-        if len(fuzzy_matches) == 1 and fuzzy_matches[0][0] <= 1:
-            return fuzzy_matches[0][1], []
+            ordered_exact = cls._sort_bank_matches(exact_matches)
+            if cls._bank_sort_key(ordered_exact[0])[1] == 0 and all(cls._bank_sort_key(bank)[1] > 0 for bank in ordered_exact[1:]):
+                return ordered_exact[0], [], False
+            return None, ordered_exact[:5], False
         if fuzzy_matches:
-            ordered = [bank for _, bank in sorted(
+            ordered_pairs = sorted(
                 fuzzy_matches,
                 key=lambda item: (
-                    item[0],
-                    POPULAR_BANK_PRIORITY.get((item[1].get("bank_code") or "").strip(), 999),
-                    cls._normalize_bank_lookup(item[1].get("bank_name") or ""),
+                    -item[0],
+                    cls._bank_sort_key(item[1]),
                 ),
-            )]
-            return None, cls._sort_bank_matches(ordered)[:5]
+            )
+            ordered = [bank for _, bank in ordered_pairs]
+            best_score = ordered_pairs[0][0]
+            second_score = ordered_pairs[1][0] if len(ordered_pairs) > 1 else 0.0
+            if best_score >= 0.80 and best_score-second_score >= 0.05:
+                return None, [ordered[0]], True
+            return None, cls._sort_bank_matches(ordered)[:5], False
 
-        return None, []
+        return None, [], False
 
     @staticmethod
     def _format_bank_suggestions(matches: list[dict[str, Any]]) -> str:
         lines = [
             "I found a few close matches.",
             "",
-            "Reply with the bank code:",
+            "Reply with the number:",
         ]
-        for bank in matches:
-            code = (bank.get("bank_code") or "").strip()
-            name = (bank.get("bank_name") or "Bank").strip()
-            lines.append(f"- `{code}` - {name}")
+        for index, bank in enumerate(matches, start=1):
+            name = BankFlow._bank_display_name(bank)
+            short_code = (bank.get("short_code") or "").strip()
+            suffix = f" — code ending {short_code}" if short_code else ""
+            lines.append(f"{index}. {name}{suffix}")
         lines.extend(
             [
                 "",
@@ -437,56 +530,131 @@ class BankFlow:
         )
         return "\n".join(lines)
 
-    @classmethod
-    def _score_bank_match(cls, bank: dict[str, Any], query: str) -> int | None:
-        code = (bank.get("bank_code") or "").strip()
-        if query == code:
-            return 0
-
-        terms = cls._bank_terms(bank)
-        if query in terms:
-            return 0
-        if any(term.startswith(query) for term in terms):
-            return 1
-        if any(query in term for term in terms):
-            return 2
-
-        query_tokens = set(query.split())
-        if query_tokens and any(query_tokens.issubset(set(term.split())) for term in terms):
-            return 2
-        return None
+    @staticmethod
+    def _format_bank_confirmation(bank: dict[str, Any]) -> str:
+        return f"Did you mean *{BankFlow._bank_display_name(bank)}*?\n\nReply *YES* to continue, or type another bank name."
 
     @classmethod
     def _bank_terms(cls, bank: dict[str, Any]) -> set[str]:
-        code = (bank.get("bank_code") or "").strip()
-        bank_name = bank.get("bank_name") or ""
+        code = cls._bank_resolve_code(bank)
+        bank_name = cls._bank_display_name(bank)
+        slug = bank.get("slug") or ""
         normalized_name = cls._normalize_bank_lookup(bank_name)
-        terms = {normalized_name}
+        terms = {normalized_name, cls._normalize_bank_lookup(slug)}
         compact = normalized_name.replace(" ", "")
         if compact:
             terms.add(compact)
+        for raw_code in cls._bank_codes(bank):
+            terms.add(raw_code)
         for alias in BANK_NAME_ALIASES.get(code, set()):
             normalized_alias = cls._normalize_bank_lookup(alias)
             if normalized_alias:
                 terms.add(normalized_alias)
                 terms.add(normalized_alias.replace(" ", ""))
+        popular_key = cls._popular_key_for_bank(bank)
+        if popular_key:
+            for key, _, aliases in POPULAR_BANK_CHOICES:
+                if key == popular_key:
+                    for alias in aliases:
+                        normalized_alias = cls._normalize_bank_lookup(alias)
+                        if normalized_alias:
+                            terms.add(normalized_alias)
+                            terms.add(normalized_alias.replace(" ", ""))
         return {term for term in terms if term}
 
     @staticmethod
     def _sort_bank_matches(matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return sorted(
             matches,
-            key=lambda bank: (
-                POPULAR_BANK_PRIORITY.get((bank.get("bank_code") or "").strip(), 999),
-                BankFlow._normalize_bank_lookup(bank.get("bank_name") or ""),
-                (bank.get("bank_code") or "").strip(),
-            ),
+            key=BankFlow._bank_sort_key,
         )
 
     @staticmethod
     def _normalize_bank_lookup(value: str) -> str:
         normalized = re.sub(r"[^a-z0-9]+", " ", value.lower())
-        return " ".join(normalized.split())
+        tokens = [token for token in normalized.split() if token not in COMMON_BANK_WORDS]
+        return " ".join(tokens)
+
+    @classmethod
+    def _popular_bank_options(cls, banks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        options: list[dict[str, Any]] = []
+        for key, _, aliases in POPULAR_BANK_CHOICES:
+            matches = [
+                bank for bank in banks
+                if cls._popular_key_for_bank(bank) == key
+                or any(cls._normalize_bank_lookup(alias) in cls._bank_terms(bank) for alias in aliases)
+            ]
+            if matches:
+                options.append(cls._sort_bank_matches(matches)[0])
+        return options
+
+    @staticmethod
+    def _popular_display_label(bank: dict[str, Any]) -> str:
+        key = BankFlow._popular_key_for_bank(bank)
+        for candidate, label, _ in POPULAR_BANK_CHOICES:
+            if candidate == key:
+                return label
+        return BankFlow._bank_display_name(bank)
+
+    @staticmethod
+    def _popular_key_for_bank(bank: dict[str, Any]) -> str:
+        name = BankFlow._normalize_bank_lookup(BankFlow._bank_display_name(bank))
+        slug = BankFlow._normalize_bank_lookup(bank.get("slug") or "")
+        compact = name.replace(" ", "")
+        for key, _, aliases in POPULAR_BANK_CHOICES:
+            normalized_aliases = {BankFlow._normalize_bank_lookup(alias) for alias in aliases}
+            if key in {name, slug, compact} or name in normalized_aliases or slug in normalized_aliases:
+                return key
+            if any(alias and (alias in name or alias in slug) for alias in normalized_aliases):
+                return key
+        return ""
+
+    @staticmethod
+    def _bank_sort_key(bank: dict[str, Any]) -> tuple[int, int, str, str]:
+        name = BankFlow._bank_display_name(bank)
+        lowered = name.lower()
+        wallet_penalty = 1 if any(term in lowered for term in ("mobile", "wallet", "easy wallet")) else 0
+        popular_key = BankFlow._popular_key_for_bank(bank)
+        return (
+            POPULAR_BANK_PRIORITY.get(popular_key, 999),
+            wallet_penalty,
+            BankFlow._normalize_bank_lookup(name),
+            BankFlow._bank_resolve_code(bank),
+        )
+
+    @staticmethod
+    def _bank_codes(bank: dict[str, Any]) -> set[str]:
+        return {
+            str(bank.get(key) or "").strip()
+            for key in ("resolve_bank_code", "nip_code", "bank_code", "short_code")
+            if str(bank.get(key) or "").strip()
+        }
+
+    @staticmethod
+    def _bank_resolve_code(bank: dict[str, Any]) -> str:
+        return (
+            str(bank.get("resolve_bank_code") or "").strip()
+            or str(bank.get("nip_code") or "").strip()
+            or str(bank.get("bank_code") or "").strip()
+        )
+
+    @staticmethod
+    def _bank_display_name(bank: dict[str, Any]) -> str:
+        return str(bank.get("bank_name") or bank.get("display_name") or "Bank").strip()
+
+    @staticmethod
+    def _normalize_bank_record(bank: dict[str, Any]) -> dict[str, Any]:
+        resolve_code = BankFlow._bank_resolve_code(bank)
+        return {
+            "provider_bank_id": str(bank.get("provider_bank_id") or bank.get("bank_id") or "").strip(),
+            "bank_code": resolve_code,
+            "bank_name": BankFlow._bank_display_name(bank),
+            "slug": str(bank.get("slug") or "").strip(),
+            "nip_code": str(bank.get("nip_code") or resolve_code).strip(),
+            "short_code": str(bank.get("short_code") or "").strip(),
+            "resolve_bank_code": resolve_code,
+            "currency": str(bank.get("currency") or "NGN").strip() or "NGN",
+        }
 
     @staticmethod
     def _extract_account_number(text: str) -> str:

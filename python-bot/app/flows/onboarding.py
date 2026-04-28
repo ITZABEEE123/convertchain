@@ -784,7 +784,7 @@ class OnboardingFlow:
         return (
             "✅ *Step 9 of 9 — Account Secured*\n\n"
             f"Account secured successfully, {first_name or 'there'}.\n\n"
-            "Your transaction password is now active and your sandbox setup is complete.\n\n"
+            "Your transaction password is now active and your account setup is complete.\n\n"
             "You can now:\n"
             "- `add bank`\n"
             "- `sell 0.25 BTC`\n"
@@ -828,7 +828,6 @@ class OnboardingFlow:
             intro = (
                 "✅ *Step 7 of 9 — Identity Verified*\n\n"
                 f"Congratulations, {sender_name or 'there'}! Your identity has been verified.\n\n"
-                "In this local sandbox, the verification provider approved your account without requiring an extra selfie step.\n\n"
             )
 
         return (

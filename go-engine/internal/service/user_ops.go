@@ -147,21 +147,47 @@ func (s *ApplicationService) ListBanks(ctx context.Context) ([]*domain.BankDirec
 	banks, err := s.graph.ListBanks(ctx)
 	if err != nil {
 		if s.logger != nil {
-			s.logger.Warn("failed to load provider bank directory; falling back to bundled directory", "error", err)
+			s.logger.Warn("failed to load provider bank directory", "error", err)
+		}
+		if cached, ok := s.cachedBankDirectoryStale(); ok {
+			if s.logger != nil {
+				s.logger.Warn("using stale provider bank directory", "bank_count", len(cached))
+			}
+			return cached, nil
+		}
+		if strings.EqualFold(s.options.Environment, "production") {
+			return nil, newBankResolveError(
+				bankErrProviderUnavailable,
+				"Bank directory is temporarily unavailable. Please try again shortly.",
+				http.StatusBadGateway,
+				nil,
+				err,
+			)
 		}
 		return staticBanks, nil
 	}
 
 	providerBanks := make([]*domain.BankDirectoryEntry, 0, len(banks))
 	for _, bank := range banks {
+		resolveCode := strings.TrimSpace(firstNonEmptyLocal(bank.ResolveBankCode, bank.NIPCode, bank.Code))
 		providerBanks = append(providerBanks, &domain.BankDirectoryEntry{
-			BankID:   bank.ID,
-			BankCode: strings.TrimSpace(bank.Code),
-			BankName: strings.TrimSpace(bank.Name),
+			BankID:          strings.TrimSpace(bank.ID),
+			ProviderBankID:  strings.TrimSpace(bank.ID),
+			BankCode:        resolveCode,
+			BankName:        strings.TrimSpace(bank.Name),
+			Slug:            strings.TrimSpace(bank.Slug),
+			NIPCode:         strings.TrimSpace(bank.NIPCode),
+			ShortCode:       strings.TrimSpace(bank.ShortCode),
+			Country:         strings.TrimSpace(bank.Country),
+			Currency:        strings.ToUpper(strings.TrimSpace(bank.Currency)),
+			ResolveBankCode: resolveCode,
 		})
 	}
 
-	merged := mergeBankDirectories(staticBanks, providerBanks)
+	merged := providerBanks
+	if len(merged) == 0 || s.graph.IsSandbox() {
+		merged = mergeBankDirectories(staticBanks, providerBanks)
+	}
 	if s.graph.IsSandbox() {
 		merged = withSandboxTestBank(merged)
 	}
@@ -172,19 +198,21 @@ func (s *ApplicationService) ListBanks(ctx context.Context) ([]*domain.BankDirec
 	return merged, nil
 }
 
-func (s *ApplicationService) ResolveBankAccount(ctx context.Context, bankCode, accountNumber, currency string) (*domain.BankAccountResolution, error) {
-	bankCode = strings.TrimSpace(bankCode)
-	accountNumber = strings.TrimSpace(accountNumber)
-	currency = strings.ToUpper(strings.TrimSpace(currency))
+func (s *ApplicationService) ResolveBankAccount(ctx context.Context, req dto.ResolveBankAccountRequest) (*domain.BankAccountResolution, error) {
+	bankCode := strings.TrimSpace(req.BankCode)
+	bankName := strings.TrimSpace(req.BankName)
+	accountNumber := strings.TrimSpace(req.AccountNumber)
+	currency := strings.ToUpper(strings.TrimSpace(req.Currency))
 	if currency == "" {
 		currency = "NGN"
 	}
+
 	if !isDigits(bankCode) || len(bankCode) < 3 || len(bankCode) > 6 {
 		return nil, newBankResolveError(
 			bankErrInvalidBankCode,
 			"Please choose a valid bank before entering your account number.",
 			http.StatusBadRequest,
-			map[string]any{"bank_code": bankCode, "account_last4": accountLast4(accountNumber)},
+			map[string]any{"bank_code": bankCode, "bank_name": bankName, "account_last4": accountLast4(accountNumber)},
 			nil,
 		)
 	}
@@ -193,7 +221,7 @@ func (s *ApplicationService) ResolveBankAccount(ctx context.Context, bankCode, a
 			bankErrInvalidAccountNumber,
 			"Please enter a valid 10-digit account number.",
 			http.StatusBadRequest,
-			map[string]any{"bank_code": bankCode, "account_last4": accountLast4(accountNumber)},
+			map[string]any{"bank_code": bankCode, "bank_name": bankName, "account_last4": accountLast4(accountNumber)},
 			nil,
 		)
 	}
@@ -202,7 +230,7 @@ func (s *ApplicationService) ResolveBankAccount(ctx context.Context, bankCode, a
 			bankErrProviderUnavailable,
 			"Bank verification is temporarily unavailable. Please try again shortly.",
 			http.StatusBadGateway,
-			map[string]any{"bank_code": bankCode, "account_last4": accountLast4(accountNumber)},
+			map[string]any{"bank_code": bankCode, "bank_name": bankName, "account_last4": accountLast4(accountNumber)},
 			errors.New("graph payout service is not configured"),
 		)
 	}
@@ -210,26 +238,38 @@ func (s *ApplicationService) ResolveBankAccount(ctx context.Context, bankCode, a
 		return resolveSandboxBankAccount(bankCode, accountNumber)
 	}
 
+	selectedBank := s.lookupProviderBankForResolve(ctx, req)
+	if selectedBank != nil {
+		bankName = firstNonEmptyLocal(bankName, selectedBank.BankName)
+		resolveCode := strings.TrimSpace(firstNonEmptyLocal(selectedBank.ResolveBankCode, selectedBank.NIPCode, selectedBank.BankCode))
+		if resolveCode != "" && resolveCode != bankCode {
+			if s.logger != nil {
+				s.logger.Info("bank_code_mapped_to_nip_code", "from_code", bankCode, "to_code", resolveCode, "bank_name", bankName)
+			}
+			bankCode = resolveCode
+		}
+	}
+
 	if s.logger != nil {
-		s.logger.Info("bank_account_resolve_started", "provider", "graph", "bank_code", bankCode, "account_last4", accountLast4(accountNumber), "currency", currency)
-		s.logger.Info("graph_bank_resolve_request_started", "bank_code", bankCode, "account_last4", accountLast4(accountNumber), "currency", currency)
+		s.logger.Info("bank_account_resolve_started", "provider", "graph", "bank_code", bankCode, "bank_name", bankName, "account_last4", accountLast4(accountNumber), "currency", currency)
+		s.logger.Info("graph_bank_resolve_request_started", "bank_code", bankCode, "bank_name", bankName, "account_last4", accountLast4(accountNumber), "currency", currency)
 	}
 
 	resolved, err := s.graph.ResolveBankAccount(ctx, bankCode, accountNumber, currency)
 	if err != nil {
-		safeErr := classifyBankResolveError(err, bankCode, accountNumber)
+		safeErr := classifyBankResolveError(err, bankCode, bankName, accountNumber)
 		if s.logger != nil {
 			var details map[string]any
 			if bankErr, ok := safeErr.(interface{ SafeDetails() map[string]any }); ok {
 				details = bankErr.SafeDetails()
 			}
-			args := []any{"bank_code", bankCode, "account_last4", accountLast4(accountNumber), "bank_error_code", bankErrProviderError}
+			args := []any{"bank_code", bankCode, "bank_name", bankName, "account_last4", accountLast4(accountNumber), "bank_error_code", bankErrProviderError}
 			if bankErr, ok := safeErr.(interface{ BankErrorCode() string }); ok {
-				args = []any{"bank_code", bankCode, "account_last4", accountLast4(accountNumber), "bank_error_code", bankErr.BankErrorCode()}
+				args = []any{"bank_code", bankCode, "bank_name", bankName, "account_last4", accountLast4(accountNumber), "bank_error_code", bankErr.BankErrorCode()}
 			}
 			if details != nil {
 				for key, value := range details {
-					if key == "bank_code" || key == "account_last4" {
+					if key == "bank_code" || key == "bank_name" || key == "account_last4" {
 						continue
 					}
 					args = append(args, key, value)
@@ -241,18 +281,21 @@ func (s *ApplicationService) ResolveBankAccount(ctx context.Context, bankCode, a
 	}
 
 	if s.logger != nil {
-		s.logger.Info("graph_bank_resolve_succeeded", "bank_code", bankCode, "account_last4", accountLast4(accountNumber))
+		s.logger.Info("graph_bank_resolve_succeeded", "bank_code", bankCode, "bank_name", bankName, "account_last4", accountLast4(accountNumber))
 	}
 
-	bankName := strings.TrimSpace(resolved.BankName)
-	if bankName == "" {
+	resolvedBankName := strings.TrimSpace(resolved.BankName)
+	if resolvedBankName == "" {
+		resolvedBankName = bankName
+	}
+	if resolvedBankName == "" {
 		bankName = bankNameFromCode(bankCode)
 	}
 
 	return &domain.BankAccountResolution{
 		BankID:        strings.TrimSpace(resolved.BankID),
-		BankCode:      strings.TrimSpace(resolved.BankCode),
-		BankName:      bankName,
+		BankCode:      firstNonEmptyLocal(strings.TrimSpace(resolved.BankCode), bankCode),
+		BankName:      firstNonEmptyLocal(resolvedBankName, bankName),
 		AccountNumber: strings.TrimSpace(resolved.AccountNumber),
 		AccountName:   strings.TrimSpace(resolved.AccountName),
 	}, nil
@@ -281,7 +324,14 @@ func (s *ApplicationService) AddBankAccount(ctx context.Context, req dto.AddBank
 		graphDestID = makeSandboxDestinationID(resolved.BankCode, resolved.AccountNumber)
 	} else {
 		var err error
-		resolved, err = s.ResolveBankAccount(ctx, req.BankCode, req.AccountNumber, req.Currency)
+		resolved, err = s.ResolveBankAccount(ctx, dto.ResolveBankAccountRequest{
+			UserID:         req.UserID,
+			ProviderBankID: req.ProviderBankID,
+			BankCode:       req.BankCode,
+			BankName:       req.BankName,
+			AccountNumber:  req.AccountNumber,
+			Currency:       req.Currency,
+		})
 		if err != nil {
 			return nil, fmt.Errorf("resolve bank account: %w", err)
 		}
@@ -478,6 +528,16 @@ func (s *ApplicationService) cachedBankDirectory() ([]*domain.BankDirectoryEntry
 	return cloneBankDirectory(s.bankDirectoryCache), true
 }
 
+func (s *ApplicationService) cachedBankDirectoryStale() ([]*domain.BankDirectoryEntry, bool) {
+	s.bankDirectoryCacheMu.RLock()
+	defer s.bankDirectoryCacheMu.RUnlock()
+
+	if len(s.bankDirectoryCache) == 0 {
+		return nil, false
+	}
+	return cloneBankDirectory(s.bankDirectoryCache), true
+}
+
 func (s *ApplicationService) setBankDirectoryCache(entries []*domain.BankDirectoryEntry) {
 	s.bankDirectoryCacheMu.Lock()
 	defer s.bankDirectoryCacheMu.Unlock()
@@ -496,4 +556,55 @@ func cloneBankDirectory(entries []*domain.BankDirectoryEntry) []*domain.BankDire
 		copied = append(copied, &value)
 	}
 	return copied
+}
+
+func (s *ApplicationService) lookupProviderBankForResolve(ctx context.Context, req dto.ResolveBankAccountRequest) *domain.BankDirectoryEntry {
+	banks, err := s.ListBanks(ctx)
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Warn("bank directory lookup failed during resolve", "error", err)
+		}
+		return nil
+	}
+
+	providerBankID := strings.TrimSpace(req.ProviderBankID)
+	bankCode := strings.TrimSpace(req.BankCode)
+	bankName := normalizeBankLookupValue(req.BankName)
+
+	for _, bank := range banks {
+		if bank == nil {
+			continue
+		}
+		if providerBankID != "" && (strings.EqualFold(bank.ProviderBankID, providerBankID) || strings.EqualFold(bank.BankID, providerBankID)) {
+			copyBank := *bank
+			return &copyBank
+		}
+	}
+
+	for _, bank := range banks {
+		if bank == nil {
+			continue
+		}
+		if bankName != "" && (normalizeBankLookupValue(bank.BankName) == bankName || normalizeBankLookupValue(bank.Slug) == bankName) {
+			copyBank := *bank
+			return &copyBank
+		}
+	}
+
+	for _, bank := range banks {
+		if bank == nil {
+			continue
+		}
+		if bankCode != "" && (bankCode == strings.TrimSpace(bank.ResolveBankCode) || bankCode == strings.TrimSpace(bank.NIPCode) || bankCode == strings.TrimSpace(bank.BankCode) || bankCode == strings.TrimSpace(bank.ShortCode)) {
+			copyBank := *bank
+			return &copyBank
+		}
+	}
+
+	return nil
+}
+
+func normalizeBankLookupValue(value string) string {
+	parts := strings.Fields(strings.ToLower(strings.TrimSpace(value)))
+	return strings.Join(parts, " ")
 }

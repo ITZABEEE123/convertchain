@@ -15,7 +15,7 @@ type BankService interface {
 	ListBankAccounts(ctx context.Context, userID string) ([]*domain.BankAccount, error)
 	GetUserKYCStatus(ctx context.Context, userID string) (string, error)
 	ListBanks(ctx context.Context) ([]*domain.BankDirectoryEntry, error)
-	ResolveBankAccount(ctx context.Context, bankCode, accountNumber, currency string) (*domain.BankAccountResolution, error)
+	ResolveBankAccount(ctx context.Context, req dto.ResolveBankAccountRequest) (*domain.BankAccountResolution, error)
 }
 
 type BankHandler struct{ svc BankService }
@@ -32,9 +32,16 @@ func (h *BankHandler) ListBanks(c *gin.Context) {
 	response := dto.ListBanksResponse{Banks: make([]dto.BankDirectoryResponse, len(banks))}
 	for i, bank := range banks {
 		response.Banks[i] = dto.BankDirectoryResponse{
-			BankID:   bank.BankID,
-			BankCode: bank.BankCode,
-			BankName: bank.BankName,
+			BankID:          bank.BankID,
+			ProviderBankID:  bank.ProviderBankID,
+			BankCode:        bank.BankCode,
+			BankName:        bank.BankName,
+			Slug:            bank.Slug,
+			NIPCode:         bank.NIPCode,
+			ShortCode:       bank.ShortCode,
+			Country:         bank.Country,
+			Currency:        bank.Currency,
+			ResolveBankCode: bank.ResolveBankCode,
 		}
 	}
 
@@ -54,7 +61,7 @@ func (h *BankHandler) ResolveBankAccount(c *gin.Context) {
 		return
 	}
 
-	resolved, err := h.svc.ResolveBankAccount(c.Request.Context(), req.BankCode, req.AccountNumber, req.Currency)
+	resolved, err := h.svc.ResolveBankAccount(c.Request.Context(), req)
 	if err != nil {
 		writeBankResolveError(c, err)
 		return

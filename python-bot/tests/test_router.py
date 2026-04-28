@@ -190,4 +190,5 @@ async def test_verified_user_can_start_add_bank_flow(mock_session_service):
     session = await mock_session_service.get("5827695262")
     assert session["flow"] == "bank"
     assert session["step"] == "COLLECT_BANK_CODE"
-    assert "058" in result
+    assert "Zenith Bank" in result
+    assert "058" not in result

@@ -223,19 +223,48 @@ func mergeBankDirectories(primary []*domain.BankDirectoryEntry, secondary []*dom
 
 		name := normalizeBankDirectoryName(entry.BankName)
 		bankID := strings.TrimSpace(entry.BankID)
+		resolveCode := firstNonEmptyLocal(strings.TrimSpace(entry.ResolveBankCode), code)
 
 		existing, ok := merged[code]
 		if !ok {
 			merged[code] = &domain.BankDirectoryEntry{
-				BankID:   bankID,
-				BankCode: code,
-				BankName: name,
+				BankID:          bankID,
+				ProviderBankID:  strings.TrimSpace(entry.ProviderBankID),
+				BankCode:        code,
+				BankName:        name,
+				Slug:            strings.TrimSpace(entry.Slug),
+				NIPCode:         strings.TrimSpace(entry.NIPCode),
+				ShortCode:       strings.TrimSpace(entry.ShortCode),
+				Country:         strings.TrimSpace(entry.Country),
+				Currency:        strings.TrimSpace(entry.Currency),
+				ResolveBankCode: resolveCode,
 			}
 			return
 		}
 
 		if existing.BankID == "" && bankID != "" {
 			existing.BankID = bankID
+		}
+		if existing.ProviderBankID == "" && strings.TrimSpace(entry.ProviderBankID) != "" {
+			existing.ProviderBankID = strings.TrimSpace(entry.ProviderBankID)
+		}
+		if existing.ResolveBankCode == "" {
+			existing.ResolveBankCode = resolveCode
+		}
+		if existing.NIPCode == "" {
+			existing.NIPCode = strings.TrimSpace(entry.NIPCode)
+		}
+		if existing.ShortCode == "" {
+			existing.ShortCode = strings.TrimSpace(entry.ShortCode)
+		}
+		if existing.Slug == "" {
+			existing.Slug = strings.TrimSpace(entry.Slug)
+		}
+		if existing.Country == "" {
+			existing.Country = strings.TrimSpace(entry.Country)
+		}
+		if existing.Currency == "" {
+			existing.Currency = strings.TrimSpace(entry.Currency)
 		}
 		if existing.BankName == "" {
 			existing.BankName = name

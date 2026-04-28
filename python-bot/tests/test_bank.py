@@ -40,25 +40,26 @@ def mock_engine_client():
     engine.list_banks = AsyncMock(
         return_value={
             "banks": [
-                {"bank_code": "000000", "bank_name": "Sandbox Test Bank"},
-                {"bank_code": "011", "bank_name": "First Bank of Nigeria"},
-                {"bank_code": "033", "bank_name": "United Bank For Africa"},
-                {"bank_code": "044", "bank_name": "Access Bank"},
-                {"bank_code": "057", "bank_name": "Zenith Bank"},
-                {"bank_code": "058", "bank_name": "Guaranty Trust Bank"},
-                {"bank_code": "063", "bank_name": "Access Bank (Diamond)"},
-                {"bank_code": "039", "bank_name": "Stanbic IBTC Bank"},
-                {"bank_code": "221", "bank_name": "Stanbic IBTC Bank"},
-                {"bank_code": "305", "bank_name": "OPay Digital Services Limited (OPay)"},
-                {"bank_code": "796", "bank_name": "Moniepoint MFB"},
-                {"bank_code": "999991", "bank_name": "PalmPay"},
+                {"bank_id": "bk-sandbox", "provider_bank_id": "bk-sandbox", "bank_code": "000000", "resolve_bank_code": "000000", "bank_name": "Sandbox Test Bank", "currency": "NGN"},
+                {"bank_id": "bk-zenith", "provider_bank_id": "bk-zenith", "bank_code": "000015", "resolve_bank_code": "000015", "nip_code": "000015", "short_code": "057", "bank_name": "ZENITH BANK PLC", "slug": "zenith", "currency": "NGN"},
+                {"bank_id": "bk-zenith-mobile", "provider_bank_id": "bk-zenith-mobile", "bank_code": "100018", "resolve_bank_code": "100018", "nip_code": "100018", "short_code": "322", "bank_name": "ZENITH MOBILE", "slug": "zenith-mobile", "currency": "NGN"},
+                {"bank_id": "bk-gtb", "provider_bank_id": "bk-gtb", "bank_code": "000013", "resolve_bank_code": "000013", "nip_code": "000013", "short_code": "058", "bank_name": "GUARANTY TRUST BANK", "slug": "gtbank", "currency": "NGN"},
+                {"bank_id": "bk-access", "provider_bank_id": "bk-access", "bank_code": "000014", "resolve_bank_code": "000014", "nip_code": "000014", "short_code": "044", "bank_name": "ACCESS BANK", "slug": "access", "currency": "NGN"},
+                {"bank_id": "bk-uba", "provider_bank_id": "bk-uba", "bank_code": "000004", "resolve_bank_code": "000004", "nip_code": "000004", "short_code": "033", "bank_name": "UNITED BANK FOR AFRICA", "slug": "uba", "currency": "NGN"},
+                {"bank_id": "bk-first", "provider_bank_id": "bk-first", "bank_code": "000016", "resolve_bank_code": "000016", "nip_code": "000016", "short_code": "011", "bank_name": "FIRST BANK OF NIGERIA", "slug": "first-bank", "currency": "NGN"},
+                {"bank_id": "bk-stanbic", "provider_bank_id": "bk-stanbic", "bank_code": "000012", "resolve_bank_code": "000012", "nip_code": "000012", "short_code": "221", "bank_name": "STANBIC IBTC BANK", "slug": "stanbic", "currency": "NGN"},
+                {"bank_id": "bk-opay-1", "provider_bank_id": "bk-opay-1", "bank_code": "100004", "resolve_bank_code": "100004", "nip_code": "100004", "short_code": "305", "bank_name": "OPAY DIGITAL SERVICES LIMITED (OPAY)", "slug": "opay", "currency": "NGN"},
+                {"bank_id": "bk-opay-2", "provider_bank_id": "bk-opay-2", "bank_code": "999992", "resolve_bank_code": "999992", "nip_code": "999992", "short_code": "999992", "bank_name": "OPAY DIGITAL SERVICES LIMITED (OPAY)", "slug": "opay-wallet", "currency": "NGN"},
+                {"bank_id": "bk-moniepoint", "provider_bank_id": "bk-moniepoint", "bank_code": "090405", "resolve_bank_code": "090405", "nip_code": "090405", "short_code": "796", "bank_name": "MONIEPOINT MICROFINANCE BANK", "slug": "moniepoint-mfb", "currency": "NGN"},
+                {"bank_id": "bk-palmpay", "provider_bank_id": "bk-palmpay", "bank_code": "999991", "resolve_bank_code": "999991", "nip_code": "999991", "short_code": "999991", "bank_name": "PALMPAY", "slug": "palmpay", "currency": "NGN"},
+                {"bank_id": "bk-kuda", "provider_bank_id": "bk-kuda", "bank_code": "090267", "resolve_bank_code": "090267", "nip_code": "090267", "short_code": "50211", "bank_name": "KUDA MICROFINANCE BANK", "slug": "kuda", "currency": "NGN"},
             ]
         }
     )
     engine.resolve_bank_account = AsyncMock(
         return_value={
-            "bank_code": "058",
-            "bank_name": "Guaranty Trust Bank",
+            "bank_code": "000013",
+            "bank_name": "GUARANTY TRUST BANK",
             "account_number": "1234567890",
             "account_name": "Test User",
         }
@@ -68,7 +69,7 @@ def mock_engine_client():
             "accounts": [
                 {
                     "bank_account_id": "bnk_1",
-                    "bank_name": "Guaranty Trust Bank",
+                    "bank_name": "GUARANTY TRUST BANK",
                     "account_number": "******1234",
                     "account_name": "Test User",
                 },
@@ -84,7 +85,7 @@ def mock_engine_client():
     engine.add_bank_account = AsyncMock(
         return_value={
             "bank_account_id": "bnk_new",
-            "bank_name": "Guaranty Trust Bank",
+            "bank_name": "GUARANTY TRUST BANK",
             "account_number": "******7890",
             "account_name": "Test User",
         }
@@ -106,8 +107,9 @@ async def test_start_bank_flow_sets_bank_state(bank_flow, mock_session_service):
     saved = await mock_session_service.get("user-1")
     assert saved["flow"] == "bank"
     assert saved["step"] == STEP_COLLECT_BANK_CODE
-    assert "bank code or bank name" in result.lower()
-    assert "058" in result
+    assert "popular banks" in result.lower()
+    assert "zenith bank" in result.lower()
+    assert "058" not in result
 
 
 @pytest.mark.asyncio
@@ -124,8 +126,10 @@ async def test_collect_bank_code_advances_to_account_number(bank_flow, mock_sess
 
     saved = await mock_session_service.get("user-1")
     assert saved["step"] == STEP_COLLECT_ACCOUNT_NUMBER
-    assert saved["bank_data"]["bank_code"] == "058"
-    assert saved["bank_data"]["bank_name"] == "Guaranty Trust Bank"
+    assert saved["bank_data"]["bank_code"] == "000013"
+    assert saved["bank_data"]["resolve_bank_code"] == "000013"
+    assert saved["bank_data"]["short_code"] == "058"
+    assert saved["bank_data"]["bank_name"] == "GUARANTY TRUST BANK"
     assert "account number" in result.lower()
 
 
@@ -149,6 +153,22 @@ async def test_collect_sandbox_bank_code_advances_to_account_number(bank_flow, m
 
 
 @pytest.mark.asyncio
+async def test_popular_number_selects_zenith_nip_code(bank_flow, mock_session_service):
+    session = {"onboarded": True, "engine_user_id": "usr_123", "flow": None, "step": None}
+    await bank_flow.start("user-1", session)
+    saved = await mock_session_service.get("user-1")
+
+    result = await bank_flow.handle_step("user-1", saved, "1")
+
+    saved = await mock_session_service.get("user-1")
+    assert saved["step"] == STEP_COLLECT_ACCOUNT_NUMBER
+    assert saved["bank_data"]["bank_code"] == "000015"
+    assert saved["bank_data"]["short_code"] == "057"
+    assert saved["bank_data"]["bank_name"] == "ZENITH BANK PLC"
+    assert "zenith bank plc" in result.lower()
+
+
+@pytest.mark.asyncio
 async def test_collect_bank_name_advances_to_account_number(bank_flow, mock_session_service):
     session = {
         "onboarded": True,
@@ -162,10 +182,47 @@ async def test_collect_bank_name_advances_to_account_number(bank_flow, mock_sess
 
     saved = await mock_session_service.get("user-1")
     assert saved["step"] == STEP_COLLECT_ACCOUNT_NUMBER
-    assert saved["bank_data"]["bank_code"] == "058"
-    assert saved["bank_data"]["bank_name"] == "Guaranty Trust Bank"
+    assert saved["bank_data"]["bank_code"] == "000013"
+    assert saved["bank_data"]["bank_name"] == "GUARANTY TRUST BANK"
     assert "i found" in result.lower()
     assert "guaranty trust bank" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_collect_zenith_prefers_real_bank_over_mobile(bank_flow, mock_session_service):
+    session = {
+        "onboarded": True,
+        "engine_user_id": "usr_123",
+        "flow": "bank",
+        "step": STEP_COLLECT_BANK_CODE,
+        "bank_data": {},
+    }
+
+    result = await bank_flow.handle_step("user-1", session, "Zenith")
+
+    saved = await mock_session_service.get("user-1")
+    assert saved["step"] == STEP_COLLECT_ACCOUNT_NUMBER
+    assert saved["bank_data"]["bank_code"] == "000015"
+    assert saved["bank_data"]["bank_name"] == "ZENITH BANK PLC"
+    assert "zenith bank plc" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_typo_senith_suggests_zenith(bank_flow, mock_session_service):
+    session = {
+        "onboarded": True,
+        "engine_user_id": "usr_123",
+        "flow": "bank",
+        "step": STEP_COLLECT_BANK_CODE,
+        "bank_data": {},
+    }
+
+    result = await bank_flow.handle_step("user-1", session, "senith")
+
+    saved = await mock_session_service.get("user-1")
+    assert saved["bank_data"]["bank_suggestion"]["bank_name"] == "ZENITH BANK PLC"
+    assert "did you mean" in result.lower()
+    assert "zenith bank plc" in result.lower()
 
 
 @pytest.mark.asyncio
@@ -178,13 +235,13 @@ async def test_collect_bank_name_returns_suggestions_for_ambiguous_match(bank_fl
         "bank_data": {},
     }
 
-    result = await bank_flow.handle_step("user-1", session, "Stanbic")
+    result = await bank_flow.handle_step("user-1", session, "OPay")
 
     saved = await mock_session_service.get("user-1")
-    assert saved == {}
+    assert saved["bank_data"]["bank_suggestions"]
     assert "close matches" in result.lower()
-    assert "039" in result
-    assert "221" in result
+    assert "OPAY" in result
+    assert "code ending" in result
 
 
 @pytest.mark.asyncio
@@ -201,7 +258,7 @@ async def test_collect_bank_code_accepts_labeled_text(bank_flow, mock_session_se
 
     saved = await mock_session_service.get("user-1")
     assert saved["step"] == STEP_COLLECT_ACCOUNT_NUMBER
-    assert saved["bank_data"]["bank_code"] == "058"
+    assert saved["bank_data"]["bank_code"] == "000013"
     assert "account number" in result.lower()
 
 
@@ -212,7 +269,7 @@ async def test_account_number_step_resolves_account_and_moves_to_confirmation(ba
         "engine_user_id": "usr_123",
         "flow": "bank",
         "step": STEP_COLLECT_ACCOUNT_NUMBER,
-        "bank_data": {"bank_code": "058", "bank_name": "Guaranty Trust Bank"},
+        "bank_data": {"bank_code": "000013", "resolve_bank_code": "000013", "bank_name": "GUARANTY TRUST BANK", "provider_bank_id": "bk-gtb"},
     }
 
     result = await bank_flow.handle_step("user-1", session, "1234567890")
@@ -220,8 +277,9 @@ async def test_account_number_step_resolves_account_and_moves_to_confirmation(ba
     mock_engine_client.resolve_bank_account.assert_awaited_once()
     payload = mock_engine_client.resolve_bank_account.await_args.args[0]
     assert payload["user_id"] == "usr_123"
-    assert payload["bank_code"] == "058"
-    assert payload["bank_name"] == "Guaranty Trust Bank"
+    assert payload["bank_code"] == "000013"
+    assert payload["provider_bank_id"] == "bk-gtb"
+    assert payload["bank_name"] == "GUARANTY TRUST BANK"
     assert payload["account_number"] == "1234567890"
     assert payload["currency"] == "NGN"
 
@@ -237,8 +295,8 @@ async def test_account_number_step_resolves_account_and_moves_to_confirmation(ba
 async def test_account_number_step_accepts_multiline_input(bank_flow, mock_session_service, mock_engine_client):
     mock_engine_client.resolve_bank_account = AsyncMock(
         return_value={
-            "bank_code": "058",
-            "bank_name": "Guaranty Trust Bank",
+            "bank_code": "000013",
+            "bank_name": "GUARANTY TRUST BANK",
             "account_number": "2274091001",
             "account_name": "Test User",
         }
@@ -248,7 +306,7 @@ async def test_account_number_step_accepts_multiline_input(bank_flow, mock_sessi
         "engine_user_id": "usr_123",
         "flow": "bank",
         "step": STEP_COLLECT_ACCOUNT_NUMBER,
-        "bank_data": {"bank_code": "058", "bank_name": "Guaranty Trust Bank"},
+        "bank_data": {"bank_code": "000013", "resolve_bank_code": "000013", "bank_name": "GUARANTY TRUST BANK"},
     }
 
     result = await bank_flow.handle_step("user-1", session, "Account number: 2274091001")
@@ -267,8 +325,8 @@ async def test_confirm_bank_account_selects_new_account(bank_flow, mock_session_
         "flow": "bank",
         "step": STEP_CONFIRM_BANK_ACCOUNT,
         "bank_data": {
-            "bank_code": "058",
-            "bank_name": "Guaranty Trust Bank",
+            "bank_code": "000013",
+            "bank_name": "GUARANTY TRUST BANK",
             "account_number": "1234567890",
             "account_name": "Test User",
         },
@@ -279,8 +337,8 @@ async def test_confirm_bank_account_selects_new_account(bank_flow, mock_session_
     mock_engine_client.add_bank_account.assert_awaited_once()
     payload = mock_engine_client.add_bank_account.await_args.args[0]
     assert payload["user_id"] == "usr_123"
-    assert payload["bank_code"] == "058"
-    assert payload["bank_name"] == "Guaranty Trust Bank"
+    assert payload["bank_code"] == "000013"
+    assert payload["bank_name"] == "GUARANTY TRUST BANK"
     assert payload["account_number"] == "1234567890"
     assert payload["account_name"] == "Test User"
     assert payload["currency"] == "NGN"
@@ -327,8 +385,8 @@ async def test_add_bank_error_returns_helpful_message(bank_flow, mock_session_se
         "flow": "bank",
         "step": STEP_CONFIRM_BANK_ACCOUNT,
         "bank_data": {
-            "bank_code": "058",
-            "bank_name": "Guaranty Trust Bank",
+            "bank_code": "000013",
+            "bank_name": "GUARANTY TRUST BANK",
             "account_number": "1234567890",
             "account_name": "Test User",
         },
@@ -354,13 +412,13 @@ async def test_account_number_resolve_failure_returns_retry_message(bank_flow, m
         "engine_user_id": "usr_123",
         "flow": "bank",
         "step": STEP_COLLECT_ACCOUNT_NUMBER,
-        "bank_data": {"bank_code": "057", "bank_name": "Zenith Bank"},
+        "bank_data": {"bank_code": "000015", "resolve_bank_code": "000015", "bank_name": "ZENITH BANK PLC"},
     }
 
     result = await bank_flow.handle_step("user-1", session, "2274091001")
 
     payload = mock_engine_client.resolve_bank_account.await_args.args[0]
-    assert payload["bank_code"] == "057"
-    assert payload["bank_name"] == "Zenith Bank"
+    assert payload["bank_code"] == "000015"
+    assert payload["bank_name"] == "ZENITH BANK PLC"
     assert payload["currency"] == "NGN"
     assert "could not verify this account" in result.lower()

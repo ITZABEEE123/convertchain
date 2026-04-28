@@ -239,7 +239,15 @@ func (s *ApplicationService) applyKYCWebhookOutcome(ctx context.Context, userID,
 	}
 
 	verified, verifiedAt, rejectionReason := webhookOutcomeFields(normalizedStatus, reason)
-	return s.updateKYCWebhookDocuments(ctx, userUUID, provider, providerRef, verified, verifiedAt, rejectionReason)
+	if err := s.updateKYCWebhookDocuments(ctx, userUUID, provider, providerRef, verified, verifiedAt, rejectionReason); err != nil {
+		return err
+	}
+	if normalizedStatus == "APPROVED" {
+		if err := s.enqueueKYCVerifiedNotification(ctx, userUUID, normalizedTier); err != nil && s.logger != nil {
+			s.logger.Warn("failed to enqueue kyc verified notification", "user_id", userUUID.String(), "tier", normalizedTier, "error", err)
+		}
+	}
+	return nil
 }
 
 func (s *ApplicationService) defaultWebhookTier(ctx context.Context, userID uuid.UUID, provider string) (string, error) {
@@ -255,6 +263,40 @@ func (s *ApplicationService) defaultWebhookTier(ctx context.Context, userID uuid
 	default:
 		return "TIER_1", nil
 	}
+}
+
+func (s *ApplicationService) enqueueKYCVerifiedNotification(ctx context.Context, userID uuid.UUID, tier string) error {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	var firstName string
+	var passwordSet bool
+	if err := tx.QueryRow(ctx, `
+		SELECT COALESCE(first_name, ''), txn_password_hash IS NOT NULL
+		FROM users
+		WHERE id = $1::uuid
+	`, userID).Scan(&firstName, &passwordSet); err != nil {
+		return err
+	}
+	if passwordSet {
+		return tx.Commit(ctx)
+	}
+
+	normalizedTier := normalizeKYCTier(tier)
+	payload := map[string]interface{}{
+		"user_id":    userID.String(),
+		"first_name": strings.TrimSpace(firstName),
+		"kyc_tier":   normalizedTier,
+		"next_step":  "SET_TRANSACTION_PASSWORD",
+	}
+	dedupeKey := fmt.Sprintf("kyc_verified:%s:%s", userID.String(), normalizedTier)
+	if err := s.enqueueNotificationTx(ctx, tx, userID, nil, "kyc.verified", payload, dedupeKey); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *ApplicationService) resolveWebhookTargetUserID(ctx context.Context, provider, userID, providerRef string) (string, error) {

@@ -22,9 +22,13 @@ func withSandboxTestBank(entries []*domain.BankDirectoryEntry) []*domain.BankDir
 
 func sandboxTestBankEntry() *domain.BankDirectoryEntry {
 	return &domain.BankDirectoryEntry{
-		BankID:   sandboxTestBankID,
-		BankCode: sandboxTestBankCode,
-		BankName: sandboxTestBankName,
+		BankID:          sandboxTestBankID,
+		ProviderBankID:  sandboxTestBankID,
+		BankCode:        sandboxTestBankCode,
+		BankName:        sandboxTestBankName,
+		Country:         "NG",
+		Currency:        "NGN",
+		ResolveBankCode: sandboxTestBankCode,
 	}
 }
 

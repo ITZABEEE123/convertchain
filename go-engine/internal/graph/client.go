@@ -92,9 +92,15 @@ type FundingBankAccount struct {
 }
 
 type Bank struct {
-	ID   string
-	Code string
-	Name string
+	ID              string
+	Code            string
+	Name            string
+	Slug            string
+	NIPCode         string
+	ShortCode       string
+	Country         string
+	Currency        string
+	ResolveBankCode string
 }
 
 type ResolvedBankAccount struct {
@@ -335,12 +341,22 @@ func (c *Client) ResolveBankAccount(ctx context.Context, bankCode, accountNumber
 		}
 	}
 
+	bankSource := source
+	usedNestedBank := false
+	if nestedBank, ok := source["bank"].(map[string]any); ok {
+		bankSource = nestedBank
+		usedNestedBank = true
+	}
+
 	resolved := &ResolvedBankAccount{
 		BankID:        stringValue(source, "bank_id", "id"),
-		BankCode:      firstNonEmpty(stringValue(source, "bank_code", "code"), strings.TrimSpace(bankCode)),
-		BankName:      stringValue(source, "bank_name", "name"),
+		BankCode:      firstNonEmpty(stringValue(bankSource, "nip_code", "bank_code", "code"), stringValue(source, "bank_code", "code"), strings.TrimSpace(bankCode)),
+		BankName:      firstNonEmpty(stringValue(bankSource, "bank_name", "name"), stringValue(source, "bank_name", "name")),
 		AccountNumber: firstNonEmpty(stringValue(source, "account_number", "number"), strings.TrimSpace(accountNumber)),
 		AccountName:   stringValue(source, "account_name", "beneficiary_name"),
+	}
+	if resolved.BankID == "" && usedNestedBank {
+		resolved.BankID = stringValue(bankSource, "id", "bank_id")
 	}
 
 	if resolved.AccountName == "" {
@@ -510,10 +526,19 @@ func parseBanks(raw json.RawMessage) ([]Bank, error) {
 
 	banks := make([]Bank, 0, len(objects))
 	for _, payload := range objects {
+		nipCode := firstNonEmpty(stringValue(payload, "nip_code", "nipCode"), stringValue(payload, "bank_code", "code"), stringValue(payload, "bankCode"))
+		shortCode := stringValue(payload, "short_code", "shortCode")
+		resolveCode := firstNonEmpty(nipCode, stringValue(payload, "bank_code", "code"), stringValue(payload, "bankCode"))
 		banks = append(banks, Bank{
-			ID:   stringValue(payload, "id", "bank_id"),
-			Code: firstNonEmpty(stringValue(payload, "bank_code", "code"), stringValue(payload, "bankCode")),
-			Name: firstNonEmpty(stringValue(payload, "bank_name", "name"), stringValue(payload, "bankName")),
+			ID:              stringValue(payload, "id", "bank_id"),
+			Code:            resolveCode,
+			Name:            firstNonEmpty(stringValue(payload, "bank_name", "name"), stringValue(payload, "bankName")),
+			Slug:            stringValue(payload, "slug"),
+			NIPCode:         nipCode,
+			ShortCode:       shortCode,
+			Country:         stringValue(payload, "country"),
+			Currency:        strings.ToUpper(stringValue(payload, "currency")),
+			ResolveBankCode: resolveCode,
 		})
 	}
 

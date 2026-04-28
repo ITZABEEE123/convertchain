@@ -16,7 +16,7 @@ func TestListBanksReturnsProviderBanks(t *testing.T) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"data": []map[string]any{
-				{"id": "bank_zenith", "bank_code": "057", "bank_name": "Zenith Bank"},
+				{"id": "bank_zenith", "name": "ZENITH BANK PLC", "slug": "zenith", "nip_code": "000015", "short_code": "057", "country": "NG", "currency": "NGN"},
 			},
 		})
 	}))
@@ -32,7 +32,7 @@ func TestListBanksReturnsProviderBanks(t *testing.T) {
 	if len(banks) != 1 {
 		t.Fatalf("expected 1 bank, got %d", len(banks))
 	}
-	if banks[0].Code != "057" || banks[0].Name != "Zenith Bank" {
+	if banks[0].Code != "000015" || banks[0].NIPCode != "000015" || banks[0].ShortCode != "057" || banks[0].Name != "ZENITH BANK PLC" {
 		t.Fatalf("unexpected bank: %+v", banks[0])
 	}
 }
@@ -49,8 +49,8 @@ func TestResolveBankAccountSendsCurrencyAndBankCode(t *testing.T) {
 		if body["currency"] != "NGN" {
 			t.Fatalf("expected currency NGN, got %#v", body["currency"])
 		}
-		if body["bank_code"] != "057" {
-			t.Fatalf("expected bank_code 057, got %#v", body["bank_code"])
+		if body["bank_code"] != "000015" {
+			t.Fatalf("expected bank_code 000015, got %#v", body["bank_code"])
 		}
 		if _, ok := body["bank_name"]; ok {
 			t.Fatalf("bank_name must not be sent to Graph resolve")
@@ -61,10 +61,13 @@ func TestResolveBankAccountSendsCurrencyAndBankCode(t *testing.T) {
 
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"data": map[string]any{
-				"bank_code":      "057",
-				"bank_name":      "Zenith Bank",
 				"account_number": "2274091001",
 				"account_name":   "TEST USER",
+				"bank": map[string]any{
+					"id":       "bank_zenith",
+					"name":     "ZENITH BANK PLC",
+					"nip_code": "000015",
+				},
 			},
 		})
 	}))
@@ -73,11 +76,11 @@ func TestResolveBankAccountSendsCurrencyAndBankCode(t *testing.T) {
 	client := NewClient("test-key", false)
 	client.baseURL = server.URL
 
-	resolved, err := client.ResolveBankAccount(context.Background(), "057", "2274091001", "NGN")
+	resolved, err := client.ResolveBankAccount(context.Background(), "000015", "2274091001", "NGN")
 	if err != nil {
 		t.Fatalf("ResolveBankAccount returned error: %v", err)
 	}
-	if resolved.AccountName != "TEST USER" || resolved.BankCode != "057" {
+	if resolved.AccountName != "TEST USER" || resolved.BankCode != "000015" || resolved.BankName != "ZENITH BANK PLC" {
 		t.Fatalf("unexpected resolution: %+v", resolved)
 	}
 }
