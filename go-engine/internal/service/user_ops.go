@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -135,6 +136,14 @@ func (s *ApplicationService) ListBanks(ctx context.Context) ([]*domain.BankDirec
 		return staticBanks, nil
 	}
 
+	if cached, ok := s.cachedBankDirectory(); ok {
+		return cached, nil
+	}
+
+	if s.logger != nil {
+		s.logger.Info("bank_list_fetch_started", "provider", "graph")
+	}
+
 	banks, err := s.graph.ListBanks(ctx)
 	if err != nil {
 		if s.logger != nil {
@@ -154,22 +163,85 @@ func (s *ApplicationService) ListBanks(ctx context.Context) ([]*domain.BankDirec
 
 	merged := mergeBankDirectories(staticBanks, providerBanks)
 	if s.graph.IsSandbox() {
-		return withSandboxTestBank(merged), nil
+		merged = withSandboxTestBank(merged)
+	}
+	s.setBankDirectoryCache(merged)
+	if s.logger != nil {
+		s.logger.Info("bank_list_fetch_succeeded", "provider", "graph", "bank_count", len(merged))
 	}
 	return merged, nil
 }
 
-func (s *ApplicationService) ResolveBankAccount(ctx context.Context, bankCode, accountNumber string) (*domain.BankAccountResolution, error) {
+func (s *ApplicationService) ResolveBankAccount(ctx context.Context, bankCode, accountNumber, currency string) (*domain.BankAccountResolution, error) {
+	bankCode = strings.TrimSpace(bankCode)
+	accountNumber = strings.TrimSpace(accountNumber)
+	currency = strings.ToUpper(strings.TrimSpace(currency))
+	if currency == "" {
+		currency = "NGN"
+	}
+	if !isDigits(bankCode) || len(bankCode) < 3 || len(bankCode) > 6 {
+		return nil, newBankResolveError(
+			bankErrInvalidBankCode,
+			"Please choose a valid bank before entering your account number.",
+			http.StatusBadRequest,
+			map[string]any{"bank_code": bankCode, "account_last4": accountLast4(accountNumber)},
+			nil,
+		)
+	}
+	if !isDigits(accountNumber) || len(accountNumber) != 10 {
+		return nil, newBankResolveError(
+			bankErrInvalidAccountNumber,
+			"Please enter a valid 10-digit account number.",
+			http.StatusBadRequest,
+			map[string]any{"bank_code": bankCode, "account_last4": accountLast4(accountNumber)},
+			nil,
+		)
+	}
 	if s.graph == nil {
-		return nil, errors.New("graph payout service is not configured")
+		return nil, newBankResolveError(
+			bankErrProviderUnavailable,
+			"Bank verification is temporarily unavailable. Please try again shortly.",
+			http.StatusBadGateway,
+			map[string]any{"bank_code": bankCode, "account_last4": accountLast4(accountNumber)},
+			errors.New("graph payout service is not configured"),
+		)
 	}
 	if s.graph.IsSandbox() {
 		return resolveSandboxBankAccount(bankCode, accountNumber)
 	}
 
-	resolved, err := s.graph.ResolveBankAccount(ctx, bankCode, accountNumber)
+	if s.logger != nil {
+		s.logger.Info("bank_account_resolve_started", "provider", "graph", "bank_code", bankCode, "account_last4", accountLast4(accountNumber), "currency", currency)
+		s.logger.Info("graph_bank_resolve_request_started", "bank_code", bankCode, "account_last4", accountLast4(accountNumber), "currency", currency)
+	}
+
+	resolved, err := s.graph.ResolveBankAccount(ctx, bankCode, accountNumber, currency)
 	if err != nil {
-		return nil, err
+		safeErr := classifyBankResolveError(err, bankCode, accountNumber)
+		if s.logger != nil {
+			var details map[string]any
+			if bankErr, ok := safeErr.(interface{ SafeDetails() map[string]any }); ok {
+				details = bankErr.SafeDetails()
+			}
+			args := []any{"bank_code", bankCode, "account_last4", accountLast4(accountNumber), "bank_error_code", bankErrProviderError}
+			if bankErr, ok := safeErr.(interface{ BankErrorCode() string }); ok {
+				args = []any{"bank_code", bankCode, "account_last4", accountLast4(accountNumber), "bank_error_code", bankErr.BankErrorCode()}
+			}
+			if details != nil {
+				for key, value := range details {
+					if key == "bank_code" || key == "account_last4" {
+						continue
+					}
+					args = append(args, key, value)
+				}
+			}
+			s.logger.Warn("graph_bank_resolve_failed", args...)
+		}
+		return nil, safeErr
+	}
+
+	if s.logger != nil {
+		s.logger.Info("graph_bank_resolve_succeeded", "bank_code", bankCode, "account_last4", accountLast4(accountNumber))
 	}
 
 	bankName := strings.TrimSpace(resolved.BankName)
@@ -200,7 +272,7 @@ func (s *ApplicationService) AddBankAccount(ctx context.Context, req dto.AddBank
 
 	if s.graph.IsSandbox() {
 		s.logger.Info("sandbox mode: resolving bank account locally without provider verification",
-			"user_id", req.UserID, "bank_code", req.BankCode, "account_number", req.AccountNumber)
+			"user_id", req.UserID, "bank_code", req.BankCode, "account_last4", accountLast4(req.AccountNumber))
 		var err error
 		resolved, err = resolveSandboxBankAccount(req.BankCode, req.AccountNumber)
 		if err != nil {
@@ -209,7 +281,7 @@ func (s *ApplicationService) AddBankAccount(ctx context.Context, req dto.AddBank
 		graphDestID = makeSandboxDestinationID(resolved.BankCode, resolved.AccountNumber)
 	} else {
 		var err error
-		resolved, err = s.ResolveBankAccount(ctx, req.BankCode, req.AccountNumber)
+		resolved, err = s.ResolveBankAccount(ctx, req.BankCode, req.AccountNumber, req.Currency)
 		if err != nil {
 			return nil, fmt.Errorf("resolve bank account: %w", err)
 		}
@@ -240,6 +312,9 @@ func (s *ApplicationService) AddBankAccount(ctx context.Context, req dto.AddBank
 	bankName := resolved.BankName
 	if payoutDestination != nil && payoutDestination.BankName != "" {
 		bankName = payoutDestination.BankName
+	}
+	if bankName == "" {
+		bankName = strings.TrimSpace(req.BankName)
 	}
 	if bankName == "" {
 		bankName = bankNameFromCode(req.BankCode)
@@ -391,4 +466,34 @@ func (s *ApplicationService) encryptPII(value string) (string, error) {
 		return value, nil
 	}
 	return s.encryptor.EncryptIfNotEmpty(value)
+}
+
+func (s *ApplicationService) cachedBankDirectory() ([]*domain.BankDirectoryEntry, bool) {
+	s.bankDirectoryCacheMu.RLock()
+	defer s.bankDirectoryCacheMu.RUnlock()
+
+	if len(s.bankDirectoryCache) == 0 || time.Now().After(s.bankDirectoryCacheExpiresAt) {
+		return nil, false
+	}
+	return cloneBankDirectory(s.bankDirectoryCache), true
+}
+
+func (s *ApplicationService) setBankDirectoryCache(entries []*domain.BankDirectoryEntry) {
+	s.bankDirectoryCacheMu.Lock()
+	defer s.bankDirectoryCacheMu.Unlock()
+
+	s.bankDirectoryCache = cloneBankDirectory(entries)
+	s.bankDirectoryCacheExpiresAt = time.Now().Add(30 * time.Minute)
+}
+
+func cloneBankDirectory(entries []*domain.BankDirectoryEntry) []*domain.BankDirectoryEntry {
+	copied := make([]*domain.BankDirectoryEntry, 0, len(entries))
+	for _, entry := range entries {
+		if entry == nil {
+			continue
+		}
+		value := *entry
+		copied = append(copied, &value)
+	}
+	return copied
 }

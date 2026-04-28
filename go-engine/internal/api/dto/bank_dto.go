@@ -3,14 +3,18 @@ package dto
 type AddBankAccountRequest struct {
 	UserID        string `json:"user_id" binding:"required"`
 	BankCode      string `json:"bank_code" binding:"required,numeric,min=3,max=6"`
+	BankName      string `json:"bank_name"`
 	AccountNumber string `json:"account_number" binding:"required,len=10,numeric"`
 	AccountName   string `json:"account_name"`
+	Currency      string `json:"currency"`
 }
 
 type ResolveBankAccountRequest struct {
 	UserID        string `json:"user_id" binding:"required"`
 	BankCode      string `json:"bank_code" binding:"required,numeric,min=3,max=6"`
+	BankName      string `json:"bank_name"`
 	AccountNumber string `json:"account_number" binding:"required,len=10,numeric"`
+	Currency      string `json:"currency"`
 }
 
 type BankDirectoryResponse struct {

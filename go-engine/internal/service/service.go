@@ -2,8 +2,11 @@ package service
 
 import (
 	"log/slog"
+	"sync"
+	"time"
 
 	appcrypto "convert-chain/go-engine/internal/crypto"
+	"convert-chain/go-engine/internal/domain"
 	"convert-chain/go-engine/internal/exchange"
 	graphclient "convert-chain/go-engine/internal/graph"
 	"convert-chain/go-engine/internal/kyc"
@@ -14,35 +17,39 @@ import (
 )
 
 type Options struct {
-	AutoApproveKYC           bool
-	Environment              string
-	KYCPrimaryProvider       string
-	SmileIDPartnerID         string
-	SmileIDAPIKey            string
-	SumsubWebhookSecret      string
+	AutoApproveKYC             bool
+	Environment                string
+	KYCPrimaryProvider         string
+	SmileIDPartnerID           string
+	SmileIDAPIKey              string
+	SumsubWebhookSecret        string
 	SumsubWebhookPublicBaseURL string
-	SumsubUseSandbox         bool
-	SumsubTier1LevelName     string
-	SumsubTier2LevelName     string
-	SumsubTier3LevelName     string
-	SumsubTier4LevelName     string
+	SumsubUseSandbox           bool
+	SumsubTier1LevelName       string
+	SumsubTier2LevelName       string
+	SumsubTier3LevelName       string
+	SumsubTier4LevelName       string
 	SumsubWebSDKLinkTTLSeconds int
-	GraphWebhookSecret       string
-	GraphWebhookPublicBaseURL string
-	BybitFallbackEnabled     bool
+	GraphWebhookSecret         string
+	GraphWebhookPublicBaseURL  string
+	BybitFallbackEnabled       bool
 }
 
 type ApplicationService struct {
-	db              *pgxpool.Pool
-	pricingEngine   *pricing.PricingEngine
-	graph           *graphclient.Client
-	primaryExchange exchange.ExchangeClient
+	db               *pgxpool.Pool
+	pricingEngine    *pricing.PricingEngine
+	graph            *graphclient.Client
+	primaryExchange  exchange.ExchangeClient
 	fallbackExchange exchange.ExchangeClient
-	encryptor       *appcrypto.PIIEncryptor
-	logger          *slog.Logger
-	userFSM         *statemachine.UserFSM
-	kycOrchestrator *kyc.KYCOrchestrator
-	options         Options
+	encryptor        *appcrypto.PIIEncryptor
+	logger           *slog.Logger
+	userFSM          *statemachine.UserFSM
+	kycOrchestrator  *kyc.KYCOrchestrator
+	options          Options
+
+	bankDirectoryCache          []*domain.BankDirectoryEntry
+	bankDirectoryCacheExpiresAt time.Time
+	bankDirectoryCacheMu        sync.RWMutex
 }
 
 func NewApplicationService(

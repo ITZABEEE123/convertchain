@@ -173,10 +173,12 @@ class BankFlow:
         bank_code = self._extract_bank_code(text)
         bank_name = None
 
+        log.info("bank_match_started", user_id=user_id[:6])
         if banks:
             matched_bank, suggestions = self._resolve_bank_input(banks, text)
             if matched_bank is None:
                 if suggestions:
+                    log.info("bank_match_ambiguous", user_id=user_id[:6], suggestion_count=len(suggestions))
                     return self._format_bank_suggestions(suggestions)
                 return (
                     "I could not find that bank in the current bank directory.\n\n"
@@ -185,6 +187,7 @@ class BankFlow:
                 )
             bank_code = (matched_bank.get("bank_code") or "").strip()
             bank_name = (matched_bank.get("bank_name") or "").strip() or None
+            log.info("bank_match_succeeded", user_id=user_id[:6], bank_code=bank_code, bank_name=bank_name)
         elif not BANK_CODE_PATTERN.match(bank_code):
             return (
                 "Invalid bank input. Please send a bank code or bank name.\n\n"
@@ -197,10 +200,9 @@ class BankFlow:
         session["step"] = STEP_COLLECT_ACCOUNT_NUMBER
         await self._session.set(user_id, session)
 
-        bank_label = f" for *{bank_name}*" if bank_name else ""
+        bank_label = f"*{bank_name}*" if bank_name else f"bank code `{bank_code}`"
         return (
-            f"Bank saved{bank_label}.\n\n"
-            "Now send your 10-digit account number.\n\n"
+            f"I found {bank_label}. Now send your 10-digit account number.\n\n"
             "Example: `1234567890`"
         )
 
@@ -214,26 +216,32 @@ class BankFlow:
             return "Account error. Type *hi* to refresh your account session."
 
         bank_code = session.get("bank_data", {}).get("bank_code", "")
+        bank_name = session.get("bank_data", {}).get("bank_name", "")
 
         try:
             resolution = await self._engine.resolve_bank_account(
                 {
                     "user_id": engine_user_id,
                     "bank_code": bank_code,
+                    "bank_name": bank_name,
                     "account_number": account_number,
+                    "currency": "NGN",
                 }
             )
         except EngineError as exc:
-            log.error("Failed to resolve bank account", error=str(exc), user_id=user_id[:6])
-            return (
-                "Could not verify that bank account.\n\n"
-                f"{exc}\n\n"
-                "Please double-check the bank code and account number, then try again."
+            log.warning(
+                "bank_account_resolve_failed",
+                error_code=exc.code,
+                status_code=exc.status_code,
+                user_id=user_id[:6],
+                account_last4=account_number[-4:],
+                bank_code=bank_code,
             )
+            return self._bank_resolve_error_message(exc)
 
         session.setdefault("bank_data", {})["bank_code"] = resolution.get("bank_code") or bank_code
-        session["bank_data"]["bank_name"] = resolution.get("bank_name") or session.get("bank_data", {}).get("bank_name") or "Bank"
-        session["bank_data"]["account_number"] = resolution.get("account_number") or account_number
+        session["bank_data"]["bank_name"] = resolution.get("bank_name") or bank_name or "Bank"
+        session["bank_data"]["account_number"] = account_number
         session["bank_data"]["account_name"] = resolution.get("account_name") or ""
         session["step"] = STEP_CONFIRM_BANK_ACCOUNT
         await self._session.set(user_id, session)
@@ -243,12 +251,12 @@ class BankFlow:
         masked_number = self._mask_account_number(session["bank_data"].get("account_number") or account_number)
 
         return (
-            "*Bank Account Verified*\n\n"
+            "I found this account:\n\n"
             f"Bank: *{bank_name}*\n"
-            f"Account: `{masked_number}`\n"
-            f"Name: *{account_name}*\n\n"
-            "Type *YES* to save this bank account.\n"
-            "Type *NO* to enter a different account number."
+            f"Account Name: *{account_name}*\n"
+            f"Account Number: `{masked_number}`\n\n"
+            "Confirm?\n\n"
+            "Type *YES* to save this bank account, or *NO* to enter a different account number."
         )
 
     async def _handle_confirm_bank_account(self, user_id: str, session: dict, text: str) -> str:
@@ -276,15 +284,16 @@ class BankFlow:
                 {
                     "user_id": engine_user_id,
                     "bank_code": bank_data.get("bank_code", ""),
+                    "bank_name": bank_data.get("bank_name", ""),
                     "account_number": bank_data.get("account_number", ""),
                     "account_name": bank_data.get("account_name", ""),
+                    "currency": "NGN",
                 }
             )
         except EngineError as exc:
-            log.error("Failed to add bank account", error=str(exc), user_id=user_id[:6])
+            log.warning("bank_account_save_failed", error_code=exc.code, status_code=exc.status_code, user_id=user_id[:6])
             return (
                 "Could not save that verified bank account.\n\n"
-                f"{exc}\n\n"
                 "Please try again in a moment."
             )
 
@@ -501,3 +510,20 @@ class BankFlow:
         if len(account_number) <= 4:
             return account_number
         return "******" + account_number[-4:]
+
+    @staticmethod
+    def _bank_resolve_error_message(exc: EngineError) -> str:
+        if exc.code in {"invalid_account_number", "invalid_bank_code", "account_not_found"} or exc.status_code == 400:
+            return (
+                "I could not verify this account. Please check the bank and 10-digit account number.\n\n"
+                "You can send the account number again, or type *cancel* to stop."
+            )
+        if exc.code in {"provider_unavailable", "provider_error"} or exc.status_code in {502, 503, 504}:
+            return (
+                "Bank verification is temporarily unavailable. Please try again shortly.\n\n"
+                "Your bank details have not been saved yet."
+            )
+        return (
+            "Could not verify that bank account right now.\n\n"
+            "Please double-check the bank and account number, then try again."
+        )

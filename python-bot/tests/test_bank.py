@@ -164,6 +164,7 @@ async def test_collect_bank_name_advances_to_account_number(bank_flow, mock_sess
     assert saved["step"] == STEP_COLLECT_ACCOUNT_NUMBER
     assert saved["bank_data"]["bank_code"] == "058"
     assert saved["bank_data"]["bank_name"] == "Guaranty Trust Bank"
+    assert "i found" in result.lower()
     assert "guaranty trust bank" in result.lower()
 
 
@@ -220,12 +221,16 @@ async def test_account_number_step_resolves_account_and_moves_to_confirmation(ba
     payload = mock_engine_client.resolve_bank_account.await_args.args[0]
     assert payload["user_id"] == "usr_123"
     assert payload["bank_code"] == "058"
+    assert payload["bank_name"] == "Guaranty Trust Bank"
     assert payload["account_number"] == "1234567890"
+    assert payload["currency"] == "NGN"
 
     saved = await mock_session_service.get("user-1")
     assert saved["step"] == STEP_CONFIRM_BANK_ACCOUNT
+    assert saved["bank_data"]["account_number"] == "1234567890"
     assert saved["bank_data"]["account_name"] == "Test User"
-    assert "bank account verified" in result.lower()
+    assert "i found this account" in result.lower()
+    assert "account name" in result.lower()
 
 
 @pytest.mark.asyncio
@@ -250,6 +255,7 @@ async def test_account_number_step_accepts_multiline_input(bank_flow, mock_sessi
 
     payload = mock_engine_client.resolve_bank_account.await_args.args[0]
     assert payload["account_number"] == "2274091001"
+    assert payload["currency"] == "NGN"
     assert "test user" in result.lower()
 
 
@@ -274,8 +280,10 @@ async def test_confirm_bank_account_selects_new_account(bank_flow, mock_session_
     payload = mock_engine_client.add_bank_account.await_args.args[0]
     assert payload["user_id"] == "usr_123"
     assert payload["bank_code"] == "058"
+    assert payload["bank_name"] == "Guaranty Trust Bank"
     assert payload["account_number"] == "1234567890"
     assert payload["account_name"] == "Test User"
+    assert payload["currency"] == "NGN"
 
     saved = await mock_session_service.get("user-1")
     assert saved["selected_bank_account_id"] == "bnk_new"
@@ -329,4 +337,30 @@ async def test_add_bank_error_returns_helpful_message(bank_flow, mock_session_se
     result = await bank_flow.handle_step("user-1", session, "YES")
 
     assert "Could not save" in result
-    assert "bank validation failed" in result
+    assert "bank validation failed" not in result
+
+
+@pytest.mark.asyncio
+async def test_account_number_resolve_failure_returns_retry_message(bank_flow, mock_session_service, mock_engine_client):
+    mock_engine_client.resolve_bank_account = AsyncMock(
+        side_effect=EngineError(
+            "Engine returned 400: account not found",
+            status_code=400,
+            code="account_not_found",
+        )
+    )
+    session = {
+        "onboarded": True,
+        "engine_user_id": "usr_123",
+        "flow": "bank",
+        "step": STEP_COLLECT_ACCOUNT_NUMBER,
+        "bank_data": {"bank_code": "057", "bank_name": "Zenith Bank"},
+    }
+
+    result = await bank_flow.handle_step("user-1", session, "2274091001")
+
+    payload = mock_engine_client.resolve_bank_account.await_args.args[0]
+    assert payload["bank_code"] == "057"
+    assert payload["bank_name"] == "Zenith Bank"
+    assert payload["currency"] == "NGN"
+    assert "could not verify this account" in result.lower()

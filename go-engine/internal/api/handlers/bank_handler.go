@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"errors"
 	"net/http"
 
 	"convert-chain/go-engine/internal/api/dto"
@@ -14,7 +15,7 @@ type BankService interface {
 	ListBankAccounts(ctx context.Context, userID string) ([]*domain.BankAccount, error)
 	GetUserKYCStatus(ctx context.Context, userID string) (string, error)
 	ListBanks(ctx context.Context) ([]*domain.BankDirectoryEntry, error)
-	ResolveBankAccount(ctx context.Context, bankCode, accountNumber string) (*domain.BankAccountResolution, error)
+	ResolveBankAccount(ctx context.Context, bankCode, accountNumber, currency string) (*domain.BankAccountResolution, error)
 }
 
 type BankHandler struct{ svc BankService }
@@ -53,9 +54,9 @@ func (h *BankHandler) ResolveBankAccount(c *gin.Context) {
 		return
 	}
 
-	resolved, err := h.svc.ResolveBankAccount(c.Request.Context(), req.BankCode, req.AccountNumber)
+	resolved, err := h.svc.ResolveBankAccount(c.Request.Context(), req.BankCode, req.AccountNumber, req.Currency)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, dto.NewError(dto.ErrCodeValidation, "Failed to resolve bank account", err.Error()))
+		writeBankResolveError(c, err)
 		return
 	}
 
@@ -63,7 +64,7 @@ func (h *BankHandler) ResolveBankAccount(c *gin.Context) {
 		BankID:        resolved.BankID,
 		BankCode:      resolved.BankCode,
 		BankName:      resolved.BankName,
-		AccountNumber: resolved.AccountNumber,
+		AccountNumber: maskAccountNumber(resolved.AccountNumber),
 		AccountName:   resolved.AccountName,
 	})
 }
@@ -83,6 +84,11 @@ func (h *BankHandler) AddBankAccount(c *gin.Context) {
 
 	account, err := h.svc.AddBankAccount(c.Request.Context(), req)
 	if err != nil {
+		var bankErr safeBankError
+		if errors.As(err, &bankErr) {
+			writeBankResolveError(c, err)
+			return
+		}
 		c.JSON(http.StatusBadRequest, dto.NewError(dto.ErrCodeValidation, "Failed to add bank account", err.Error()))
 		return
 	}
@@ -104,11 +110,6 @@ func (h *BankHandler) ListBankAccounts(c *gin.Context) {
 }
 
 func bankAccountToResponse(acc *domain.BankAccount) dto.BankAccountResponse {
-	masked := acc.AccountNumber
-	if len(masked) > 4 {
-		masked = "******" + masked[len(masked)-4:]
-	}
-
 	bankName := ""
 	if acc.BankName != nil {
 		bankName = *acc.BankName
@@ -119,10 +120,33 @@ func bankAccountToResponse(acc *domain.BankAccount) dto.BankAccountResponse {
 		UserID:        acc.UserID.String(),
 		BankCode:      acc.BankCode,
 		BankName:      bankName,
-		AccountNumber: masked,
+		AccountNumber: maskAccountNumber(acc.AccountNumber),
 		AccountName:   acc.AccountName,
 		IsVerified:    acc.IsVerified,
 		IsPrimary:     acc.IsPrimary,
 		CreatedAt:     acc.CreatedAt.Format("2006-01-02T15:04:05Z"),
 	}
+}
+
+type safeBankError interface {
+	BankErrorCode() string
+	HTTPStatusCode() int
+	UserMessage() string
+	SafeDetails() map[string]any
+}
+
+func writeBankResolveError(c *gin.Context, err error) {
+	var bankErr safeBankError
+	if errors.As(err, &bankErr) {
+		c.JSON(bankErr.HTTPStatusCode(), dto.NewError(bankErr.BankErrorCode(), bankErr.UserMessage(), bankErr.SafeDetails()))
+		return
+	}
+	c.JSON(http.StatusBadRequest, dto.NewError("provider_error", "Bank verification failed. Please try again.", nil))
+}
+
+func maskAccountNumber(accountNumber string) string {
+	if len(accountNumber) <= 4 {
+		return accountNumber
+	}
+	return "******" + accountNumber[len(accountNumber)-4:]
 }

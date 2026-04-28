@@ -44,8 +44,29 @@ type envelope struct {
 }
 
 type apiError struct {
+	Code    string `json:"code"`
 	Message string `json:"message"`
 	Details any    `json:"details"`
+}
+
+type ProviderError struct {
+	StatusCode int
+	Code       string
+	Message    string
+}
+
+func (e *ProviderError) Error() string {
+	if e == nil {
+		return ""
+	}
+	message := strings.TrimSpace(e.Message)
+	if message == "" {
+		message = "provider error"
+	}
+	if e.Code != "" {
+		return fmt.Sprintf("oval api error (HTTP %d): %s: %s", e.StatusCode, e.Code, message)
+	}
+	return fmt.Sprintf("oval api error (HTTP %d): %s", e.StatusCode, message)
 }
 
 type WalletAccount struct {
@@ -189,23 +210,35 @@ func (c *Client) request(ctx context.Context, method, path string, query url.Val
 }
 
 func decodeError(statusCode int, payload []byte) error {
+	providerErr := &ProviderError{
+		StatusCode: statusCode,
+		Code:       fmt.Sprintf("GRAPH_HTTP_%d", statusCode),
+		Message:    strings.TrimSpace(string(payload)),
+	}
+
 	var wrapped envelope
 	if err := json.Unmarshal(payload, &wrapped); err == nil {
 		if wrapped.Error != nil {
-			details := stringifyAny(wrapped.Error.Details)
-			if details != "" {
-				return fmt.Errorf("oval api error (HTTP %d): %s (%s)", statusCode, wrapped.Error.Message, details)
+			if strings.TrimSpace(wrapped.Error.Code) != "" {
+				providerErr.Code = strings.TrimSpace(wrapped.Error.Code)
 			}
 			if wrapped.Error.Message != "" {
-				return fmt.Errorf("oval api error (HTTP %d): %s", statusCode, wrapped.Error.Message)
+				providerErr.Message = wrapped.Error.Message
+			}
+			details := stringifyAny(wrapped.Error.Details)
+			if details != "" && providerErr.Message == "" {
+				providerErr.Message = details
 			}
 		}
 		if wrapped.Message != "" {
-			return fmt.Errorf("oval api error (HTTP %d): %s", statusCode, wrapped.Message)
+			providerErr.Message = wrapped.Message
 		}
 	}
 
-	return fmt.Errorf("oval api error (HTTP %d): %s", statusCode, strings.TrimSpace(string(payload)))
+	if providerErr.Message == "" {
+		providerErr.Message = http.StatusText(statusCode)
+	}
+	return providerErr
 }
 
 func (c *Client) ListWalletAccounts(ctx context.Context) ([]WalletAccount, error) {
@@ -274,8 +307,12 @@ func (c *Client) ListBanks(ctx context.Context) ([]Bank, error) {
 	return parseBanks(raw)
 }
 
-func (c *Client) ResolveBankAccount(ctx context.Context, bankCode, accountNumber string) (*ResolvedBankAccount, error) {
+func (c *Client) ResolveBankAccount(ctx context.Context, bankCode, accountNumber, currency string) (*ResolvedBankAccount, error) {
+	if strings.TrimSpace(currency) == "" {
+		currency = "NGN"
+	}
 	body := map[string]any{
+		"currency":       strings.ToUpper(strings.TrimSpace(currency)),
 		"bank_code":      strings.TrimSpace(bankCode),
 		"account_number": strings.TrimSpace(accountNumber),
 	}
